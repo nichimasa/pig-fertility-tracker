@@ -30,8 +30,10 @@ def get_google_sheet():
         
         # Streamlit Cloud の場合は Secrets から認証情報を取得
         if 'gcp_service_account' in st.secrets:
+            # Secretsの内容を辞書に変換
+            creds_dict = dict(st.secrets["gcp_service_account"])
             credentials = Credentials.from_service_account_info(
-                st.secrets["gcp_service_account"],
+                creds_dict,
                 scopes=scopes
             )
         # ローカルの場合は credentials.json を使用
