@@ -27,7 +27,20 @@ def get_google_sheet():
             'https://www.googleapis.com/auth/spreadsheets',
             'https://www.googleapis.com/auth/drive'
         ]
-        credentials = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scopes)
+        
+        # Streamlit Cloud の場合は Secrets から認証情報を取得
+        if 'gcp_service_account' in st.secrets:
+            credentials = Credentials.from_service_account_info(
+                st.secrets["gcp_service_account"],
+                scopes=scopes
+            )
+        # ローカルの場合は credentials.json を使用
+        elif os.path.exists(CREDENTIALS_FILE):
+            credentials = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scopes)
+        else:
+            st.error("認証情報が見つかりません")
+            return None
+        
         client = gspread.authorize(credentials)
         spreadsheet = client.open_by_key(SPREADSHEET_ID)
         return spreadsheet
