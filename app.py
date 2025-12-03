@@ -28,17 +28,16 @@ def get_google_sheet():
             'https://www.googleapis.com/auth/drive'
         ]
         
+        # ローカルの場合は credentials.json を使用
+        if os.path.exists(CREDENTIALS_FILE):
+            credentials = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scopes)
         # Streamlit Cloud の場合は Secrets から認証情報を取得
-        if 'gcp_service_account' in st.secrets:
-            # Secretsの内容を辞書に変換
+        elif 'gcp_service_account' in st.secrets:
             creds_dict = dict(st.secrets["gcp_service_account"])
             credentials = Credentials.from_service_account_info(
                 creds_dict,
                 scopes=scopes
             )
-        # ローカルの場合は credentials.json を使用
-        elif os.path.exists(CREDENTIALS_FILE):
-            credentials = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scopes)
         else:
             st.error("認証情報が見つかりません")
             return None
