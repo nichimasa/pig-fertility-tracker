@@ -28,16 +28,11 @@ def get_google_sheet():
             'https://www.googleapis.com/auth/drive'
         ]
         
-        # ローカルの場合は credentials.json を使用
         if os.path.exists(CREDENTIALS_FILE):
             credentials = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scopes)
-        # Streamlit Cloud の場合は Secrets から認証情報を取得
         elif 'gcp_service_account' in st.secrets:
             creds_dict = dict(st.secrets["gcp_service_account"])
-            credentials = Credentials.from_service_account_info(
-                creds_dict,
-                scopes=scopes
-            )
+            credentials = Credentials.from_service_account_info(creds_dict, scopes=scopes)
         else:
             st.error("認証情報が見つかりません")
             return None
@@ -54,7 +49,7 @@ def get_or_create_worksheet(spreadsheet, sheet_name):
     try:
         worksheet = spreadsheet.worksheet(sheet_name)
     except gspread.WorksheetNotFound:
-        worksheet = spreadsheet.add_worksheet(title=sheet_name, rows=1000, cols=20)
+        worksheet = spreadsheet.add_worksheet(title=sheet_name, rows=1000, cols=30)
     return worksheet
 
 def load_data_from_sheet(spreadsheet):
@@ -62,20 +57,18 @@ def load_data_from_sheet(spreadsheet):
     data = {"pig_details": {}, "repeat_breeding": {}, "week_comments": {}}
     
     try:
-        # 母豚詳細
         ws_pig = get_or_create_worksheet(spreadsheet, "母豚詳細")
         records = ws_pig.get_all_records()
         for record in records:
             if record.get("key"):
                 data["pig_details"][record["key"]] = {
-                    "分娩舎": record.get("分娩舎", ""),
-                    "ロット": record.get("ロット", ""),
-                    "哺乳日数": record.get("哺乳日数", ""),
-                    "P2値": record.get("P2値", ""),
-                    "コメント": record.get("コメント", "")
+                    "分娩舎": str(record.get("分娩舎", "")),
+                    "ロット": str(record.get("ロット", "")),
+                    "哺乳日数": str(record.get("哺乳日数", "")),
+                    "P2値": str(record.get("P2値", "")),
+                    "コメント": str(record.get("コメント", ""))
                 }
         
-        # 再発付け
         ws_repeat = get_or_create_worksheet(spreadsheet, "再発付け")
         records = ws_repeat.get_all_records()
         for record in records:
@@ -85,77 +78,176 @@ def load_data_from_sheet(spreadsheet):
                     "受胎": str(record.get("受胎", ""))
                 }
         
-        # 週コメント
         ws_comment = get_or_create_worksheet(spreadsheet, "週コメント")
         records = ws_comment.get_all_records()
         for record in records:
             if record.get("week_id"):
-                data["week_comments"][record["week_id"]] = record.get("コメント", "")
+                data["week_comments"][record["week_id"]] = str(record.get("コメント", ""))
     
     except Exception as e:
         st.warning(f"データ読み込み中にエラーが発生しました: {e}")
     
     return data
 
-def save_data_to_sheet(spreadsheet, data, week_id):
-    """スプレッドシートにデータを保存"""
+def save_breeding_records(spreadsheet, df, week_id):
+    """種付記録をスプレッドシートに保存（一括処理）"""
     try:
-        # 母豚詳細を保存
+        ws = get_or_create_worksheet(spreadsheet, "種付記録")
+        
+        # 既存データを取得
+        existing_data = ws.get_all_values()
+        
+        # ヘッダー設定（week_id + CSVの列名）
+        csv_columns = df.columns.tolist()
+        headers = ['week_id'] + csv_columns
+        
+        # 新しいデータを準備
+        new_rows = []
+        for _, row in df.iterrows():
+            row_data = [week_id] + [str(v) if pd.notna(v) else '' for v in row.values]
+            new_rows.append(row_data)
+        
+        if len(existing_data) <= 1 or existing_data[0][0] == '':
+            # 新規または空のヘッダー：ヘッダー + データを一括書き込み
+            all_data = [headers] + new_rows
+        else:
+            # 既存データから同じweek_id以外を残す
+            all_data = [headers]  # 新しいヘッダーを使用
+            for row in existing_data[1:]:
+                if row and len(row) > 0 and row[0] != week_id and row[0] != '':
+                    all_data.append(row)
+            # 新しいデータを追加
+            all_data.extend(new_rows)
+        
+        # シートをクリアして一括書き込み
+        ws.clear()
+        ws.update(f'A1', all_data)
+        
+        return True
+    except Exception as e:
+        st.error(f"種付記録の保存に失敗しました: {e}")
+        return False
+
+def load_breeding_records(spreadsheet, week_id):
+    """種付記録をスプレッドシートから読み込み"""
+    try:
+        ws = get_or_create_worksheet(spreadsheet, "種付記録")
+        data = ws.get_all_values()
+        
+        if len(data) <= 1:
+            return None
+        
+        headers = data[0]
+        rows = [row for row in data[1:] if row and row[0] == week_id]
+        
+        if not rows:
+            return None
+        
+        # DataFrameを作成
+        df = pd.DataFrame(rows, columns=headers)
+        
+        # week_id列を除外（存在する場合のみ）
+        if 'week_id' in df.columns:
+            df = df.drop(columns=['week_id'])
+        
+        return df
+    except Exception as e:
+        st.error(f"種付記録の読み込みに失敗しました: {e}")
+        return None
+
+def get_saved_weeks(spreadsheet):
+    """保存済みの週一覧を取得"""
+    try:
+        ws = get_or_create_worksheet(spreadsheet, "種付記録")
+        data = ws.get_all_values()
+        
+        if len(data) <= 1:
+            return []
+        
+        week_ids = list(set(row[0] for row in data[1:] if row and row[0]))
+        week_ids.sort(reverse=True)
+        return week_ids
+    except Exception as e:
+        st.error(f"週一覧の取得に失敗しました: {e}")
+        return []
+
+def save_data_to_sheet(spreadsheet, data, week_id):
+    """手入力データをスプレッドシートに保存（一括処理）"""
+    try:
+        # === 母豚詳細を保存 ===
         ws_pig = get_or_create_worksheet(spreadsheet, "母豚詳細")
-        existing_records = ws_pig.get_all_records()
-        existing_keys = [r.get("key") for r in existing_records]
+        existing_data = ws_pig.get_all_values()
         
-        # ヘッダーがなければ追加
-        if not existing_records:
-            ws_pig.update('A1:F1', [["key", "分娩舎", "ロット", "哺乳日数", "P2値", "コメント"]])
+        # ヘッダー
+        headers = ["key", "分娩舎", "ロット", "哺乳日数", "P2値", "コメント"]
         
+        if len(existing_data) == 0:
+            new_data = [headers]
+        else:
+            # 既存データから同じweek_id以外を残す
+            new_data = [existing_data[0]]
+            for row in existing_data[1:]:
+                if row and not row[0].startswith(week_id):
+                    new_data.append(row)
+        
+        # 新しいデータを追加
         for key, details in data["pig_details"].items():
             if key.startswith(week_id):
                 row_data = [key, details.get("分娩舎", ""), details.get("ロット", ""), 
                            details.get("哺乳日数", ""), details.get("P2値", ""), details.get("コメント", "")]
-                if key in existing_keys:
-                    # 既存行を更新
-                    row_index = existing_keys.index(key) + 2
-                    ws_pig.update(f'A{row_index}:F{row_index}', [row_data])
-                else:
-                    # 新規行を追加
-                    ws_pig.append_row(row_data)
+                new_data.append(row_data)
         
-        # 再発付けを保存
+        # 一括書き込み
+        ws_pig.clear()
+        if new_data:
+            ws_pig.update(f'A1:F{len(new_data)}', new_data)
+        
+        # === 再発付けを保存 ===
         ws_repeat = get_or_create_worksheet(spreadsheet, "再発付け")
-        existing_records = ws_repeat.get_all_records()
-        existing_weeks = [r.get("week_id") for r in existing_records]
+        existing_data = ws_repeat.get_all_values()
         
-        if not existing_records:
-            ws_repeat.update('A1:C1', [["week_id", "種付", "受胎"]])
+        headers = ["week_id", "種付", "受胎"]
+        
+        if len(existing_data) == 0:
+            new_data = [headers]
+        else:
+            new_data = [existing_data[0]]
+            for row in existing_data[1:]:
+                if row and row[0] != week_id:
+                    new_data.append(row)
         
         if week_id in data["repeat_breeding"]:
             repeat_data = data["repeat_breeding"][week_id]
             row_data = [week_id, repeat_data.get("種付", ""), repeat_data.get("受胎", "")]
-            if week_id in existing_weeks:
-                row_index = existing_weeks.index(week_id) + 2
-                ws_repeat.update(f'A{row_index}:C{row_index}', [row_data])
-            else:
-                ws_repeat.append_row(row_data)
+            new_data.append(row_data)
         
-        # 週コメントを保存
+        ws_repeat.clear()
+        if new_data:
+            ws_repeat.update(f'A1:C{len(new_data)}', new_data)
+        
+        # === 週コメントを保存 ===
         ws_comment = get_or_create_worksheet(spreadsheet, "週コメント")
-        existing_records = ws_comment.get_all_records()
-        existing_weeks = [r.get("week_id") for r in existing_records]
+        existing_data = ws_comment.get_all_values()
         
-        if not existing_records:
-            ws_comment.update('A1:B1', [["week_id", "コメント"]])
+        headers = ["week_id", "コメント"]
+        
+        if len(existing_data) == 0:
+            new_data = [headers]
+        else:
+            new_data = [existing_data[0]]
+            for row in existing_data[1:]:
+                if row and row[0] != week_id:
+                    new_data.append(row)
         
         if week_id in data["week_comments"]:
             row_data = [week_id, data["week_comments"][week_id]]
-            if week_id in existing_weeks:
-                row_index = existing_weeks.index(week_id) + 2
-                ws_comment.update(f'A{row_index}:B{row_index}', [row_data])
-            else:
-                ws_comment.append_row(row_data)
+            new_data.append(row_data)
+        
+        ws_comment.clear()
+        if new_data:
+            ws_comment.update(f'A1:B{len(new_data)}', new_data)
         
         return True
-    
     except Exception as e:
         st.error(f"データ保存中にエラーが発生しました: {e}")
         return False
@@ -204,34 +296,61 @@ spreadsheet = get_google_sheet()
 if spreadsheet:
     st.sidebar.success("✅ Googleスプレッドシート接続済み")
     comments_data = load_data_from_sheet(spreadsheet)
+    saved_weeks = get_saved_weeks(spreadsheet)
 else:
-    st.sidebar.warning("⚠️ ローカル保存モードで動作中")
-    # ローカルファイルから読み込み（フォールバック）
-    COMMENTS_FILE = "comments_data.json"
-    if os.path.exists(COMMENTS_FILE):
-        with open(COMMENTS_FILE, 'r', encoding='utf-8') as f:
-            comments_data = json.load(f)
-    else:
-        comments_data = {"pig_details": {}, "repeat_breeding": {}, "week_comments": {}}
-
-if "pig_details" not in comments_data:
-    comments_data["pig_details"] = {}
-if "repeat_breeding" not in comments_data:
-    comments_data["repeat_breeding"] = {}
-if "week_comments" not in comments_data:
-    comments_data["week_comments"] = {}
+    st.sidebar.warning("⚠️ オフラインモード")
+    comments_data = {"pig_details": {}, "repeat_breeding": {}, "week_comments": {}}
+    saved_weeks = []
 
 # タイトル
 st.title("🐷 鑑定落ちリスト")
 st.write("養豚場の受胎率管理システム")
 
-# サイドバー：ファイルアップロード
-st.sidebar.header("📁 データアップロード")
+# ===================
+# サイドバー
+# ===================
+st.sidebar.header("📁 データ選択")
 
-uploaded_csv = st.sidebar.file_uploader(
-    "種付記録CSV（Porker出力）",
-    type=['csv']
+# データソースの選択
+data_source = st.sidebar.radio(
+    "データの読み込み方法",
+    ["CSVをアップロード", "過去データから選択"],
+    index=0
 )
+
+df = None
+week_id = None
+
+if data_source == "CSVをアップロード":
+    uploaded_csv = st.sidebar.file_uploader(
+        "種付記録CSV（Porker出力）",
+        type=['csv']
+    )
+    
+    if uploaded_csv is not None:
+        df = pd.read_csv(uploaded_csv, encoding='utf-8-sig')
+        df['受胎'] = df['妊娠鑑定結果'] == '受胎確定'
+        start_date = pd.to_datetime(df['種付日'].min())
+        week_id = start_date.strftime('%Y-%m-%d')
+
+elif data_source == "過去データから選択":
+    if saved_weeks:
+        selected_week = st.sidebar.selectbox(
+            "週を選択",
+            saved_weeks,
+            format_func=lambda x: f"{x} 週"
+        )
+        
+        if selected_week:
+            week_id = selected_week
+            df = load_breeding_records(spreadsheet, week_id)
+            if df is not None:
+                df['受胎'] = df['妊娠鑑定結果'] == '受胎確定'
+    else:
+        st.sidebar.info("保存済みのデータがありません")
+
+# P2値・採精レポートのアップロード
+st.sidebar.header("📊 追加データ")
 
 uploaded_p2 = st.sidebar.file_uploader(
     "P2値集計表（経産・Excel）",
@@ -248,21 +367,14 @@ uploaded_semen = st.sidebar.file_uploader(
     type=['xlsx']
 )
 
+# ===================
 # メインコンテンツ
-if uploaded_csv is not None:
-    # ===================
-    # データ読み込み
-    # ===================
-    df = pd.read_csv(uploaded_csv, encoding='utf-8-sig')
-    df['受胎'] = df['妊娠鑑定結果'] == '受胎確定'
-    
+# ===================
+if df is not None and week_id is not None:
     start_date = pd.to_datetime(df['種付日'].min())
     end_date = pd.to_datetime(df['種付日'].max())
-    week_id = start_date.strftime('%Y-%m-%d')
     
-    # ===================
     # ヘッダー情報
-    # ===================
     st.header(f"📅 種付期間: {start_date.strftime('%Y-%m-%d')} ～ {end_date.strftime('%Y-%m-%d')}")
     st.caption(f"作成日: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     
@@ -275,10 +387,10 @@ if uploaded_csv is not None:
     pregnant = df['受胎'].sum()
     fertility_rate = pregnant / total * 100
     
-    df_sow = df[df['産次'] >= 2]
+    df_sow = df[df['産次'].astype(int) >= 2]
     sow_rate = df_sow['受胎'].sum() / len(df_sow) * 100 if len(df_sow) > 0 else 0
     
-    df_gilt = df[df['産次'] == 1]
+    df_gilt = df[df['産次'].astype(int) == 1]
     gilt_rate = df_gilt['受胎'].sum() / len(df_gilt) * 100 if len(df_gilt) > 0 else 0
     
     col1, col2, col3 = st.columns(3)
@@ -313,7 +425,7 @@ if uploaded_csv is not None:
     st.write("")
     
     # ===================
-    # 2列レイアウト：産次別 & 精液別
+    # 産次別 & 精液別
     # ===================
     col_left, col_right = st.columns(2)
     
@@ -321,8 +433,8 @@ if uploaded_csv is not None:
         st.subheader("【産次別受胎率】")
         
         parity_data = []
-        for parity in sorted(df['産次'].unique()):
-            df_p = df[df['産次'] == parity]
+        for parity in sorted(df['産次'].astype(int).unique()):
+            df_p = df[df['産次'].astype(int) == parity]
             p_total = len(df_p)
             p_pregnant = df_p['受胎'].sum()
             p_rate = p_pregnant / p_total * 100 if p_total > 0 else 0
@@ -333,14 +445,12 @@ if uploaded_csv is not None:
                 '受胎率': f"{p_rate:.1f}%"
             })
         
-        # 再発付けデータを取得
+        # 再発付けデータ
         saved_repeat = comments_data["repeat_breeding"].get(week_id, {"種付": "", "受胎": ""})
         
-        # セッションステートの初期化
         if 'temp_repeat_breeding' not in st.session_state:
             st.session_state.temp_repeat_breeding = saved_repeat
         
-        # 再発付けの受胎率を計算して追加
         repeat_total = st.session_state.temp_repeat_breeding.get("種付", "")
         repeat_pregnant = st.session_state.temp_repeat_breeding.get("受胎", "")
         
@@ -420,43 +530,15 @@ if uploaded_csv is not None:
                 col1, col2, col3, col4 = st.columns(4)
                 
                 with col1:
-                    bunben = st.text_input(
-                        "分娩舎",
-                        value=saved_details.get("分娩舎", ""),
-                        key=f"bunben_{detail_key}",
-                        placeholder="例: 1号"
-                    )
-                
+                    bunben = st.text_input("分娩舎", value=saved_details.get("分娩舎", ""), key=f"bunben_{detail_key}", placeholder="例: 1号")
                 with col2:
-                    lot = st.text_input(
-                        "ロット",
-                        value=saved_details.get("ロット", ""),
-                        key=f"lot_{detail_key}",
-                        placeholder="例: 2-3"
-                    )
-                
+                    lot = st.text_input("ロット", value=saved_details.get("ロット", ""), key=f"lot_{detail_key}", placeholder="例: 2-3")
                 with col3:
-                    honyugs = st.text_input(
-                        "哺乳日数",
-                        value=saved_details.get("哺乳日数", ""),
-                        key=f"honyu_{detail_key}",
-                        placeholder="例: 21"
-                    )
-                
+                    honyugs = st.text_input("哺乳日数", value=saved_details.get("哺乳日数", ""), key=f"honyu_{detail_key}", placeholder="例: 21")
                 with col4:
-                    p2_value = st.text_input(
-                        "P2値",
-                        value=saved_details.get("P2値", ""),
-                        key=f"p2_{detail_key}",
-                        placeholder="例: 12"
-                    )
+                    p2_value = st.text_input("P2値", value=saved_details.get("P2値", ""), key=f"p2_{detail_key}", placeholder="例: 12")
                 
-                comment = st.text_input(
-                    "コメント",
-                    value=saved_details.get("コメント", ""),
-                    key=f"comment_{detail_key}",
-                    placeholder="廃用理由、治療歴、助産歴など"
-                )
+                comment = st.text_input("コメント", value=saved_details.get("コメント", ""), key=f"comment_{detail_key}", placeholder="廃用理由、治療歴、助産歴など")
                 
                 st.session_state.temp_pig_details[detail_key] = {
                     "分娩舎": to_halfwidth(bunben),
@@ -473,21 +555,21 @@ if uploaded_csv is not None:
             pig_id = str(row['母豚番号'])
             detail_key = f"{week_id}_{pig_id}"
             
-            details = st.session_state.temp_pig_details.get(
-                detail_key, 
-                comments_data["pig_details"].get(detail_key, {})
-            )
+            details = st.session_state.temp_pig_details.get(detail_key, comments_data["pig_details"].get(detail_key, {}))
             
-            hormone = row['投与ホルモン'] if pd.notna(row['投与ホルモン']) else ''
-            days_after_weaning = row['離乳後交配日数'] if pd.notna(row['離乳後交配日数']) else ''
+            hormone = row['投与ホルモン'] if pd.notna(row.get('投与ホルモン')) else ''
+            days_after_weaning = row['離乳後交配日数'] if pd.notna(row.get('離乳後交配日数')) else ''
             if days_after_weaning != '':
-                days_after_weaning = int(days_after_weaning)
+                try:
+                    days_after_weaning = int(float(days_after_weaning))
+                except:
+                    pass
             
             display_data.append({
                 '種付日': row['種付日'],
                 '母豚番号': pig_id,
                 '精液': row['雄豚・精液・あて雄'],
-                '分娩予定日': row['分娩予定日'],
+                '分娩予定日': row.get('分娩予定日', ''),
                 '産次': row['産次'],
                 '投与ホルモン': hormone,
                 '離乳後交配日数': days_after_weaning,
@@ -512,14 +594,13 @@ if uploaded_csv is not None:
         df_p2 = pd.read_excel(uploaded_p2, header=1)
         df_p2['離乳日_str'] = df_p2['離乳日'].astype(str).str[:10]
         
-        df_sow_for_p2 = df[df['産次'] >= 2]
+        df_sow_for_p2 = df[df['産次'].astype(int) >= 2]
         if len(df_sow_for_p2) > 0 and df_sow_for_p2['前回離乳日'].notna().any():
             most_common_weaning = df_sow_for_p2['前回離乳日'].value_counts().idxmax()
-            matched_p2 = df_p2[df_p2['離乳日_str'] == most_common_weaning]
+            matched_p2 = df_p2[df_p2['離乳日_str'] == str(most_common_weaning)[:10]]
             
             if len(matched_p2) > 0:
                 p2_row = matched_p2.iloc[0]
-                
                 st.write(f"**離乳日:** {most_common_weaning} / **ロット:** {p2_row['離乳ロット']}")
                 
                 p2_columns = [str(i) for i in range(4, 21)]
@@ -540,7 +621,6 @@ if uploaded_csv is not None:
                 
                 with col_chart:
                     import altair as alt
-                    
                     df_p2_chart = pd.DataFrame(p2_data)
                     df_p2_chart = df_p2_chart.sort_values('P2値(mm)')
                     df_p2_chart['P2値'] = df_p2_chart['P2値(mm)'].astype(str) + 'mm'
@@ -549,10 +629,7 @@ if uploaded_csv is not None:
                         x=alt.X('P2値:N', sort=df_p2_chart['P2値'].tolist(), title='P2値'),
                         y=alt.Y('頭数:Q', title='頭数'),
                         tooltip=['P2値', '頭数']
-                    ).properties(
-                        height=300
-                    )
-                    
+                    ).properties(height=300)
                     st.altair_chart(chart, use_container_width=True)
                 
                 with col_table:
@@ -560,7 +637,6 @@ if uploaded_csv is not None:
                     df_p2_table = df_p2_table[df_p2_table['頭数'] > 0]
                     df_p2_table = df_p2_table.sort_values('P2値(mm)')
                     df_p2_table['P2値(mm)'] = df_p2_table['P2値(mm)'].astype(str) + 'mm'
-                    
                     display_centered_table(df_p2_table, height=300)
                 
                 st.write(f"**合計:** {total_count}頭 / **平均P2値:** {average_p2:.1f}mm")
@@ -582,7 +658,6 @@ if uploaded_csv is not None:
         
         if len(matched_gilt_p2) > 0:
             gilt_p2_row = matched_gilt_p2.iloc[0]
-            
             st.write(f"**種付開始週:** {week_id}")
             
             p2_columns = [str(i) for i in range(4, 21)]
@@ -603,7 +678,6 @@ if uploaded_csv is not None:
             
             with col_chart_gilt:
                 import altair as alt
-                
                 df_gilt_p2_chart = pd.DataFrame(gilt_p2_data)
                 df_gilt_p2_chart = df_gilt_p2_chart.sort_values('P2値(mm)')
                 df_gilt_p2_chart['P2値'] = df_gilt_p2_chart['P2値(mm)'].astype(str) + 'mm'
@@ -612,10 +686,7 @@ if uploaded_csv is not None:
                     x=alt.X('P2値:N', sort=df_gilt_p2_chart['P2値'].tolist(), title='P2値'),
                     y=alt.Y('頭数:Q', title='頭数'),
                     tooltip=['P2値', '頭数']
-                ).properties(
-                    height=300
-                )
-                
+                ).properties(height=300)
                 st.altair_chart(chart_gilt, use_container_width=True)
             
             with col_table_gilt:
@@ -623,7 +694,6 @@ if uploaded_csv is not None:
                 df_gilt_p2_table = df_gilt_p2_table[df_gilt_p2_table['頭数'] > 0]
                 df_gilt_p2_table = df_gilt_p2_table.sort_values('P2値(mm)')
                 df_gilt_p2_table['P2値(mm)'] = df_gilt_p2_table['P2値(mm)'].astype(str) + 'mm'
-                
                 display_centered_table(df_gilt_p2_table, height=300)
             
             st.write(f"**合計:** {gilt_total_count}頭 / **平均P2値:** {gilt_average_p2:.1f}mm")
@@ -663,7 +733,6 @@ if uploaded_csv is not None:
             df_semen_display['採精日'] = df_semen_display['採精日'].dt.strftime('%Y-%m-%d')
             df_semen_display['備考'] = df_semen_display['備考'].fillna('').astype(str)
             df_semen_display.columns = ['採精日', '個体番号', '採精量(ml)', '精子数(億)', '備考']
-            
             display_centered_table(df_semen_display)
         else:
             st.info("対象期間の採精データがありません")
@@ -680,7 +749,7 @@ if uploaded_csv is not None:
     
     week_comment = st.text_area(
         "この週の鑑定落ちリストに対するコメント",
-        value=st.session_state.temp_week_comment,
+        value=saved_week_comment,
         height=150,
         placeholder="必要妊豚在庫の確保状況、不受胎の原因分析、今後の対応など",
         key="week_comment_input"
@@ -696,56 +765,54 @@ if uploaded_csv is not None:
     
     with col_save:
         if st.button("💾 データを保存", type="primary"):
-            # データを準備
-            save_data = {
-                "pig_details": st.session_state.temp_pig_details,
-                "repeat_breeding": {week_id: st.session_state.temp_repeat_breeding},
-                "week_comments": {week_id: week_comment}
-            }
-            
             if spreadsheet:
-                # Googleスプレッドシートに保存
+                # 種付記録を保存
+                save_breeding_records(spreadsheet, df.drop(columns=['受胎']), week_id)
+                
+                # 手入力データを保存
+                save_data = {
+                    "pig_details": st.session_state.temp_pig_details if 'temp_pig_details' in st.session_state else {},
+                    "repeat_breeding": {week_id: st.session_state.temp_repeat_breeding} if 'temp_repeat_breeding' in st.session_state else {},
+                    "week_comments": {week_id: week_comment}
+                }
+                
                 success = save_data_to_sheet(spreadsheet, save_data, week_id)
                 if success:
-                    st.success("✅ Googleスプレッドシートに保存しました！")
+                    st.success("✅ データを保存しました！")
+                    st.cache_resource.clear()
             else:
-                # ローカルファイルに保存（フォールバック）
-                for key, value in st.session_state.temp_pig_details.items():
-                    if any(v for v in value.values()):
-                        comments_data["pig_details"][key] = value
-                
-                if st.session_state.temp_repeat_breeding.get("種付") or st.session_state.temp_repeat_breeding.get("受胎"):
-                    comments_data["repeat_breeding"][week_id] = st.session_state.temp_repeat_breeding
-                
-                if week_comment:
-                    comments_data["week_comments"][week_id] = week_comment
-                
-                with open("comments_data.json", 'w', encoding='utf-8') as f:
-                    json.dump(comments_data, f, ensure_ascii=False, indent=2)
-                st.success("✅ ローカルに保存しました！")
+                st.error("スプレッドシートに接続できません")
     
     with col_status:
-        detail_count = sum(1 for k in comments_data["pig_details"].keys() if k.startswith(week_id))
-        week_comment_exists = week_id in comments_data["week_comments"]
-        repeat_exists = week_id in comments_data["repeat_breeding"]
-        st.caption(f"この週の保存済み: 母豚詳細 {detail_count}件 / 週コメント {'あり' if week_comment_exists else 'なし'} / 再発付け {'あり' if repeat_exists else 'なし'}")
+        if week_id in saved_weeks:
+            st.caption(f"✅ この週のデータは保存済みです")
+        else:
+            st.caption(f"⚠️ この週のデータはまだ保存されていません")
 
 else:
-    st.info("👈 サイドバーから種付記録CSVをアップロードしてください")
+    st.info("👈 サイドバーからデータを選択してください")
     
     st.markdown("""
     ### 使い方
-    1. **種付記録CSV**: Porkerからダウンロードした種付記録をアップロード
-    2. **P2値集計表（経産）**: 離乳時P2値の集計表をアップロード（任意）
-    3. **P2値集計表（初産）**: 種付時P2値の集計表をアップロード（任意）
-    4. **採精レポート**: 採精情報をアップロード（任意）
     
-    アップロードすると、自動で受胎率レポートが生成されます。
+    **方法1: 新しいCSVをアップロード**
+    1. サイドバーで「CSVをアップロード」を選択
+    2. 種付記録CSVをアップロード
+    3. レポートを確認し、「データを保存」をクリック
+    
+    **方法2: 過去データを閲覧**
+    1. サイドバーで「過去データから選択」を選択
+    2. 閲覧したい週を選ぶ
+    3. レポートが表示されます
+    
+    **追加データ（任意）**
+    - P2値集計表（経産・初産）
+    - 採精レポート
     """)
     
-    # 保存データの確認
-    if spreadsheet:
-        st.sidebar.divider()
-        st.sidebar.subheader("📊 保存データ")
-        st.sidebar.write(f"保存済み週数: {len(comments_data['week_comments'])}週")
-        st.sidebar.write(f"保存済み母豚詳細: {len(comments_data['pig_details'])}件")
+    if saved_weeks:
+        st.write("**保存済みの週:**")
+        for w in saved_weeks[:5]:
+            st.write(f"- {w}")
+        if len(saved_weeks) > 5:
+            st.write(f"...他 {len(saved_weeks) - 5} 週")
