@@ -257,9 +257,39 @@ def save_data_to_sheet(spreadsheet, data, week_id):
 # ===================
 st.markdown("""
 <style>
+    /* テーブル中央揃え */
     table { width: 100%; }
     th { text-align: center !important; }
     td { text-align: center !important; }
+    
+    /* セレクトボックスのカーソルを指に変更 */
+    [data-testid="stSelectbox"] > div > div {
+        cursor: pointer !important;
+    }
+    
+    [data-testid="stSelectbox"] input {
+        cursor: pointer !important;
+    }
+    
+    /* サイドバーのセレクトボックスのドロップダウンを前面に表示 */
+    [data-testid="stSidebar"] [data-testid="stSelectbox"] > div > div > div {
+        z-index: 9999 !important;
+    }
+    
+    /* ドロップダウンリストを前面に表示 */
+    [data-baseweb="popover"] {
+        z-index: 9999 !important;
+    }
+    
+    /* サイドバー内の要素の重なり順を調整 */
+    [data-testid="stSidebar"] [data-testid="stExpander"] {
+        z-index: 1 !important;
+    }
+    
+    /* ファイルアップローダーの重なり順を調整 */
+    [data-testid="stFileUploader"] {
+        z-index: 1 !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -295,8 +325,9 @@ spreadsheet = get_google_sheet()
 
 if spreadsheet:
     st.sidebar.success("✅ Googleスプレッドシート接続済み")
-    comments_data = load_data_from_sheet(spreadsheet)
-    saved_weeks = get_saved_weeks(spreadsheet)
+    with st.spinner("📊 保存データを読み込み中..."):
+        comments_data = load_data_from_sheet(spreadsheet)
+        saved_weeks = get_saved_weeks(spreadsheet)
 else:
     st.sidebar.warning("⚠️ オフラインモード")
     comments_data = {"pig_details": {}, "repeat_breeding": {}, "week_comments": {}}
@@ -343,29 +374,32 @@ elif data_source == "過去データから選択":
         
         if selected_week:
             week_id = selected_week
-            df = load_breeding_records(spreadsheet, week_id)
-            if df is not None:
-                df['受胎'] = df['妊娠鑑定結果'] == '受胎確定'
+            with st.spinner("📂 データを読み込み中..."):
+                df = load_breeding_records(spreadsheet, week_id)
+                if df is not None:
+                    df['受胎'] = df['妊娠鑑定結果'] == '受胎確定'
     else:
         st.sidebar.info("保存済みのデータがありません")
 
 # P2値・採精レポートのアップロード
-st.sidebar.header("📊 追加データ")
+with st.sidebar.expander("📊 追加データ", expanded=False):
+    uploaded_p2 = st.file_uploader(
+        "P2値集計表（経産・Excel）",
+        type=['xlsx'],
+        key="p2_uploader"
+    )
 
-uploaded_p2 = st.sidebar.file_uploader(
-    "P2値集計表（経産・Excel）",
-    type=['xlsx']
-)
+    uploaded_gilt_p2 = st.file_uploader(
+        "P2値集計表（初産・Excel）",
+        type=['xlsx'],
+        key="gilt_p2_uploader"
+    )
 
-uploaded_gilt_p2 = st.sidebar.file_uploader(
-    "P2値集計表（初産・Excel）",
-    type=['xlsx']
-)
-
-uploaded_semen = st.sidebar.file_uploader(
-    "採精レポート（Excel）",
-    type=['xlsx']
-)
+    uploaded_semen = st.file_uploader(
+        "採精レポート（Excel）",
+        type=['xlsx'],
+        key="semen_uploader"
+    )
 
 # ===================
 # メインコンテンツ
@@ -766,17 +800,19 @@ if df is not None and week_id is not None:
     with col_save:
         if st.button("💾 データを保存", type="primary"):
             if spreadsheet:
-                # 種付記録を保存
-                save_breeding_records(spreadsheet, df.drop(columns=['受胎']), week_id)
+                with st.spinner("💾 データを保存中...しばらくお待ちください"):
+                    # 種付記録を保存
+                    save_breeding_records(spreadsheet, df.drop(columns=['受胎']), week_id)
+                    
+                    # 手入力データを保存
+                    save_data = {
+                        "pig_details": st.session_state.temp_pig_details if 'temp_pig_details' in st.session_state else {},
+                        "repeat_breeding": {week_id: st.session_state.temp_repeat_breeding} if 'temp_repeat_breeding' in st.session_state else {},
+                        "week_comments": {week_id: week_comment}
+                    }
+                    
+                    success = save_data_to_sheet(spreadsheet, save_data, week_id)
                 
-                # 手入力データを保存
-                save_data = {
-                    "pig_details": st.session_state.temp_pig_details if 'temp_pig_details' in st.session_state else {},
-                    "repeat_breeding": {week_id: st.session_state.temp_repeat_breeding} if 'temp_repeat_breeding' in st.session_state else {},
-                    "week_comments": {week_id: week_comment}
-                }
-                
-                success = save_data_to_sheet(spreadsheet, save_data, week_id)
                 if success:
                     st.success("✅ データを保存しました！")
                     st.cache_resource.clear()
