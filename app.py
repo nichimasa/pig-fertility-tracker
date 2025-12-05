@@ -72,8 +72,11 @@ def load_data_from_sheet(spreadsheet):
         ws_repeat = get_or_create_worksheet(spreadsheet, "再発付け")
         records = ws_repeat.get_all_records()
         for record in records:
-            if record.get("week_id"):
-                data["repeat_breeding"][record["week_id"]] = {
+            farm = record.get("farm_name", "")
+            week = record.get("week_id", "")
+            if farm and week:
+                key = f"{farm}_{week}"
+                data["repeat_breeding"][key] = {
                     "種付": str(record.get("種付", "")),
                     "受胎": str(record.get("受胎", ""))
                 }
@@ -81,15 +84,18 @@ def load_data_from_sheet(spreadsheet):
         ws_comment = get_or_create_worksheet(spreadsheet, "週コメント")
         records = ws_comment.get_all_records()
         for record in records:
-            if record.get("week_id"):
-                data["week_comments"][record["week_id"]] = str(record.get("コメント", ""))
+            farm = record.get("farm_name", "")
+            week = record.get("week_id", "")
+            if farm and week:
+                key = f"{farm}_{week}"
+                data["week_comments"][key] = str(record.get("コメント", ""))
     
     except Exception as e:
         st.warning(f"データ読み込み中にエラーが発生しました: {e}")
     
     return data
 
-def save_breeding_records(spreadsheet, df, week_id):
+def save_breeding_records(spreadsheet, df, week_id, farm_name):
     """種付記録をスプレッドシートに保存（一括処理）"""
     try:
         ws = get_or_create_worksheet(spreadsheet, "種付記録")
@@ -97,38 +103,39 @@ def save_breeding_records(spreadsheet, df, week_id):
         # 既存データを取得
         existing_data = ws.get_all_values()
         
-        # ヘッダー設定（week_id + CSVの列名）
+        # ヘッダー設定（farm_name + week_id + CSVの列名）
         csv_columns = df.columns.tolist()
-        headers = ['week_id'] + csv_columns
+        headers = ['farm_name', 'week_id'] + csv_columns
         
         # 新しいデータを準備
         new_rows = []
         for _, row in df.iterrows():
-            row_data = [week_id] + [str(v) if pd.notna(v) else '' for v in row.values]
+            row_data = [farm_name, week_id] + [str(v) if pd.notna(v) else '' for v in row.values]
             new_rows.append(row_data)
         
         if len(existing_data) <= 1 or existing_data[0][0] == '':
             # 新規または空のヘッダー：ヘッダー + データを一括書き込み
             all_data = [headers] + new_rows
         else:
-            # 既存データから同じweek_id以外を残す
-            all_data = [headers]  # 新しいヘッダーを使用
+            # 既存データから同じfarm_name + week_idの組み合わせ以外を残す
+            all_data = [headers]
             for row in existing_data[1:]:
-                if row and len(row) > 0 and row[0] != week_id and row[0] != '':
-                    all_data.append(row)
+                if row and len(row) >= 2:
+                    # 農場名とweek_idの両方が一致する場合は除外
+                    if not (row[0] == farm_name and row[1] == week_id):
+                        all_data.append(row)
             # 新しいデータを追加
             all_data.extend(new_rows)
         
         # シートをクリアして一括書き込み
         ws.clear()
-        ws.update(f'A1', all_data)
+        ws.update('A1', all_data)
         
         return True
     except Exception as e:
         st.error(f"種付記録の保存に失敗しました: {e}")
         return False
-
-def load_breeding_records(spreadsheet, week_id):
+def load_breeding_records(spreadsheet, week_id, farm_name):
     """種付記録をスプレッドシートから読み込み"""
     try:
         ws = get_or_create_worksheet(spreadsheet, "種付記録")
@@ -138,7 +145,8 @@ def load_breeding_records(spreadsheet, week_id):
             return None
         
         headers = data[0]
-        rows = [row for row in data[1:] if row and row[0] == week_id]
+        # farm_nameとweek_idの両方が一致する行を取得
+        rows = [row for row in data[1:] if row and len(row) >= 2 and row[0] == farm_name and row[1] == week_id]
         
         if not rows:
             return None
@@ -146,7 +154,9 @@ def load_breeding_records(spreadsheet, week_id):
         # DataFrameを作成
         df = pd.DataFrame(rows, columns=headers)
         
-        # week_id列を除外（存在する場合のみ）
+        # farm_name列とweek_id列を除外
+        if 'farm_name' in df.columns:
+            df = df.drop(columns=['farm_name'])
         if 'week_id' in df.columns:
             df = df.drop(columns=['week_id'])
         
@@ -154,98 +164,121 @@ def load_breeding_records(spreadsheet, week_id):
     except Exception as e:
         st.error(f"種付記録の読み込みに失敗しました: {e}")
         return None
-
-def get_saved_weeks(spreadsheet):
-    """保存済みの週一覧を取得"""
+def get_saved_farms_and_weeks(spreadsheet):
+    """保存済みの農場と週一覧を取得"""
     try:
         ws = get_or_create_worksheet(spreadsheet, "種付記録")
         data = ws.get_all_values()
         
         if len(data) <= 1:
-            return []
+            return {}, []
         
-        week_ids = list(set(row[0] for row in data[1:] if row and row[0]))
-        week_ids.sort(reverse=True)
-        return week_ids
+        # 農場ごとの週を取得
+        farm_weeks = {}
+        all_farms = set()
+        
+        for row in data[1:]:
+            if row and len(row) >= 2 and row[0] and row[1]:
+                farm_name = row[0]
+                week_id = row[1]
+                all_farms.add(farm_name)
+                
+                if farm_name not in farm_weeks:
+                    farm_weeks[farm_name] = set()
+                farm_weeks[farm_name].add(week_id)
+        
+        # セットをソートしたリストに変換
+        for farm in farm_weeks:
+            farm_weeks[farm] = sorted(list(farm_weeks[farm]), reverse=True)
+        
+        all_farms = sorted(list(all_farms))
+        
+        return farm_weeks, all_farms
     except Exception as e:
-        st.error(f"週一覧の取得に失敗しました: {e}")
-        return []
+        st.error(f"データ一覧の取得に失敗しました: {e}")
+        return {}, []
 
-def save_data_to_sheet(spreadsheet, data, week_id):
+def save_data_to_sheet(spreadsheet, data, week_id, farm_name):
     """手入力データをスプレッドシートに保存（一括処理）"""
     try:
+        # キーのプレフィックス（農場名_週ID）
+        key_prefix = f"{farm_name}_{week_id}"
+        
         # === 母豚詳細を保存 ===
         ws_pig = get_or_create_worksheet(spreadsheet, "母豚詳細")
         existing_data = ws_pig.get_all_values()
         
-        # ヘッダー
-        headers = ["key", "分娩舎", "ロット", "哺乳日数", "P2値", "コメント"]
+        headers = ["key", "farm_name", "week_id", "分娩舎", "ロット", "哺乳日数", "P2値", "コメント"]
         
         if len(existing_data) == 0:
             new_data = [headers]
         else:
-            # 既存データから同じweek_id以外を残す
-            new_data = [existing_data[0]]
+            # 既存データから同じfarm_name + week_id以外を残す
+            new_data = [headers]
             for row in existing_data[1:]:
-                if row and not row[0].startswith(week_id):
-                    new_data.append(row)
+                if row and len(row) >= 3:
+                    if not (row[1] == farm_name and row[2] == week_id):
+                        new_data.append(row)
         
         # 新しいデータを追加
         for key, details in data["pig_details"].items():
-            if key.startswith(week_id):
-                row_data = [key, details.get("分娩舎", ""), details.get("ロット", ""), 
+            if key.startswith(key_prefix):
+                row_data = [key, farm_name, week_id, details.get("分娩舎", ""), details.get("ロット", ""), 
                            details.get("哺乳日数", ""), details.get("P2値", ""), details.get("コメント", "")]
                 new_data.append(row_data)
         
-        # 一括書き込み
         ws_pig.clear()
         if new_data:
-            ws_pig.update(f'A1:F{len(new_data)}', new_data)
+            ws_pig.update('A1', new_data)
         
         # === 再発付けを保存 ===
         ws_repeat = get_or_create_worksheet(spreadsheet, "再発付け")
         existing_data = ws_repeat.get_all_values()
         
-        headers = ["week_id", "種付", "受胎"]
+        headers = ["farm_name", "week_id", "種付", "受胎"]
         
         if len(existing_data) == 0:
             new_data = [headers]
         else:
-            new_data = [existing_data[0]]
+            new_data = [headers]
             for row in existing_data[1:]:
-                if row and row[0] != week_id:
-                    new_data.append(row)
+                if row and len(row) >= 2:
+                    if not (row[0] == farm_name and row[1] == week_id):
+                        new_data.append(row)
         
-        if week_id in data["repeat_breeding"]:
-            repeat_data = data["repeat_breeding"][week_id]
-            row_data = [week_id, repeat_data.get("種付", ""), repeat_data.get("受胎", "")]
+        repeat_key = f"{farm_name}_{week_id}"
+        if repeat_key in data["repeat_breeding"]:
+            repeat_data = data["repeat_breeding"][repeat_key]
+            row_data = [farm_name, week_id, repeat_data.get("種付", ""), repeat_data.get("受胎", "")]
             new_data.append(row_data)
         
         ws_repeat.clear()
         if new_data:
-            ws_repeat.update(f'A1:C{len(new_data)}', new_data)
+            ws_repeat.update('A1', new_data)
         
         # === 週コメントを保存 ===
         ws_comment = get_or_create_worksheet(spreadsheet, "週コメント")
         existing_data = ws_comment.get_all_values()
         
-        headers = ["week_id", "コメント"]
+        headers = ["farm_name", "week_id", "コメント"]
         
         if len(existing_data) == 0:
             new_data = [headers]
         else:
-            new_data = [existing_data[0]]
+            new_data = [headers]
             for row in existing_data[1:]:
-                if row and row[0] != week_id:
-                    new_data.append(row)
+                if row and len(row) >= 2:
+                    if not (row[0] == farm_name and row[1] == week_id):
+                        new_data.append(row)
         
-        if week_id in data["week_comments"]:
-            row_data = [week_id, data["week_comments"][week_id]]
+        comment_key = f"{farm_name}_{week_id}"
+        if comment_key in data["week_comments"]:
+            row_data = [farm_name, week_id, data["week_comments"][comment_key]]
             new_data.append(row_data)
         
         ws_comment.clear()
         if new_data:
-            ws_comment.update(f'A1:B{len(new_data)}', new_data)
+            ws_comment.update('A1', new_data)
         
         return True
     except Exception as e:
@@ -327,11 +360,12 @@ if spreadsheet:
     st.sidebar.success("✅ Googleスプレッドシート接続済み")
     with st.spinner("📊 保存データを読み込み中..."):
         comments_data = load_data_from_sheet(spreadsheet)
-        saved_weeks = get_saved_weeks(spreadsheet)
+        farm_weeks, all_farms = get_saved_farms_and_weeks(spreadsheet)
 else:
     st.sidebar.warning("⚠️ オフラインモード")
     comments_data = {"pig_details": {}, "repeat_breeding": {}, "week_comments": {}}
-    saved_weeks = []
+    farm_weeks = {}
+    all_farms = []
 
 # タイトル
 st.title("🐷 鑑定落ちリスト")
@@ -351,6 +385,7 @@ data_source = st.sidebar.radio(
 
 df = None
 week_id = None
+farm_name = None
 
 if data_source == "CSVをアップロード":
     uploaded_csv = st.sidebar.file_uploader(
@@ -363,21 +398,39 @@ if data_source == "CSVをアップロード":
         df['受胎'] = df['妊娠鑑定結果'] == '受胎確定'
         start_date = pd.to_datetime(df['種付日'].min())
         week_id = start_date.strftime('%Y-%m-%d')
+        
+        # 農場名を取得
+        if '農場' in df.columns:
+            farm_name = df['農場'].iloc[0]
+        else:
+            farm_name = "不明"
 
 elif data_source == "過去データから選択":
-    if saved_weeks:
-        selected_week = st.sidebar.selectbox(
-            "週を選択",
-            saved_weeks,
-            format_func=lambda x: f"{x} 週"
+    if all_farms:
+        selected_farm = st.sidebar.selectbox(
+            "農場を選択",
+            all_farms
         )
         
-        if selected_week:
-            week_id = selected_week
-            with st.spinner("📂 データを読み込み中..."):
-                df = load_breeding_records(spreadsheet, week_id)
-                if df is not None:
-                    df['受胎'] = df['妊娠鑑定結果'] == '受胎確定'
+        if selected_farm and selected_farm in farm_weeks:
+            weeks_for_farm = farm_weeks[selected_farm]
+            
+            if weeks_for_farm:
+                selected_week = st.sidebar.selectbox(
+                    "週を選択",
+                    weeks_for_farm,
+                    format_func=lambda x: f"{x} 週"
+                )
+                
+                if selected_week:
+                    farm_name = selected_farm
+                    week_id = selected_week
+                    with st.spinner("📂 データを読み込み中..."):
+                        df = load_breeding_records(spreadsheet, week_id, farm_name)
+                        if df is not None:
+                            df['受胎'] = df['妊娠鑑定結果'] == '受胎確定'
+            else:
+                st.sidebar.info("この農場の保存データがありません")
     else:
         st.sidebar.info("保存済みのデータがありません")
 
@@ -410,6 +463,7 @@ if df is not None and week_id is not None:
     
     # ヘッダー情報
     st.header(f"📅 種付期間: {start_date.strftime('%Y-%m-%d')} ～ {end_date.strftime('%Y-%m-%d')}")
+    st.subheader(f"🏠 農場: {farm_name}")
     st.caption(f"作成日: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     
     # ===================
@@ -480,7 +534,8 @@ if df is not None and week_id is not None:
             })
         
         # 再発付けデータ
-        saved_repeat = comments_data["repeat_breeding"].get(week_id, {"種付": "", "受胎": ""})
+        repeat_key = f"{farm_name}_{week_id}"
+        saved_repeat = comments_data["repeat_breeding"].get(repeat_key, {"種付": "", "受胎": ""})
         
         if 'temp_repeat_breeding' not in st.session_state:
             st.session_state.temp_repeat_breeding = saved_repeat
@@ -556,7 +611,7 @@ if df is not None and week_id is not None:
         
         for idx, row in df_not_pregnant.iterrows():
             pig_id = str(row['母豚番号'])
-            detail_key = f"{week_id}_{pig_id}"
+            detail_key = f"{farm_name}_{week_id}_{pig_id}"
             
             saved_details = comments_data["pig_details"].get(detail_key, {})
             
@@ -587,7 +642,7 @@ if df is not None and week_id is not None:
         display_data = []
         for idx, row in df_not_pregnant.iterrows():
             pig_id = str(row['母豚番号'])
-            detail_key = f"{week_id}_{pig_id}"
+            detail_key = f"{farm_name}_{week_id}_{pig_id}"
             
             details = st.session_state.temp_pig_details.get(detail_key, comments_data["pig_details"].get(detail_key, {}))
             
@@ -776,7 +831,8 @@ if df is not None and week_id is not None:
     # ===================
     st.subheader("【週のコメント】")
     
-    saved_week_comment = comments_data["week_comments"].get(week_id, "")
+    comment_key = f"{farm_name}_{week_id}"
+    saved_week_comment = comments_data["week_comments"].get(comment_key, "")
     
     if 'temp_week_comment' not in st.session_state:
         st.session_state.temp_week_comment = saved_week_comment
@@ -802,16 +858,19 @@ if df is not None and week_id is not None:
             if spreadsheet:
                 with st.spinner("💾 データを保存中...しばらくお待ちください"):
                     # 種付記録を保存
-                    save_breeding_records(spreadsheet, df.drop(columns=['受胎']), week_id)
+                    save_breeding_records(spreadsheet, df.drop(columns=['受胎']), week_id, farm_name)
+                    
+                    # キーのプレフィックス
+                    key_prefix = f"{farm_name}_{week_id}"
                     
                     # 手入力データを保存
                     save_data = {
                         "pig_details": st.session_state.temp_pig_details if 'temp_pig_details' in st.session_state else {},
-                        "repeat_breeding": {week_id: st.session_state.temp_repeat_breeding} if 'temp_repeat_breeding' in st.session_state else {},
-                        "week_comments": {week_id: week_comment}
+                        "repeat_breeding": {key_prefix: st.session_state.temp_repeat_breeding} if 'temp_repeat_breeding' in st.session_state else {},
+                        "week_comments": {key_prefix: week_comment}
                     }
                     
-                    success = save_data_to_sheet(spreadsheet, save_data, week_id)
+                    success = save_data_to_sheet(spreadsheet, save_data, week_id, farm_name)
                 
                 if success:
                     st.success("✅ データを保存しました！")
@@ -820,11 +879,11 @@ if df is not None and week_id is not None:
                 st.error("スプレッドシートに接続できません")
     
     with col_status:
-        if week_id in saved_weeks:
+        is_saved = farm_name in farm_weeks and week_id in farm_weeks.get(farm_name, [])
+        if is_saved:
             st.caption(f"✅ この週のデータは保存済みです")
         else:
             st.caption(f"⚠️ この週のデータはまだ保存されていません")
-
 else:
     st.info("👈 サイドバーからデータを選択してください")
     
@@ -846,9 +905,10 @@ else:
     - 採精レポート
     """)
     
-    if saved_weeks:
-        st.write("**保存済みの週:**")
-        for w in saved_weeks[:5]:
-            st.write(f"- {w}")
-        if len(saved_weeks) > 5:
-            st.write(f"...他 {len(saved_weeks) - 5} 週")
+    if all_farms:
+        st.write("**保存済みのデータ:**")
+        for farm in all_farms[:3]:
+            weeks = farm_weeks.get(farm, [])
+            st.write(f"- {farm}: {len(weeks)}週分")
+        if len(all_farms) > 3:
+            st.write(f"...他 {len(all_farms) - 3} 農場")
