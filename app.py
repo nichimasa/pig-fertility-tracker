@@ -5,6 +5,8 @@ import json
 import os
 import gspread
 from google.oauth2.service_account import Credentials
+import dropbox
+from io import BytesIO
 
 # ページの設定
 st.set_page_config(
@@ -18,6 +20,68 @@ st.set_page_config(
 # ===================
 SPREADSHEET_ID = "1xJCrmUNqdAX0CNR_Mm7zenvgR-StP5d9VVRSe0CBnXM"
 CREDENTIALS_FILE = "credentials.json"
+
+# ===================
+# Dropbox設定
+# ===================
+DROPBOX_ACCESS_TOKEN = os.environ.get("DROPBOX_ACCESS_TOKEN", "")
+
+def get_dropbox_client():
+    """Dropboxクライアントを取得"""
+    token = DROPBOX_ACCESS_TOKEN
+    # Streamlit Cloudの場合はSecretsから取得
+    if not token and 'dropbox' in st.secrets:
+        token = st.secrets["dropbox"]["access_token"]
+    
+    if token:
+        try:
+            dbx = dropbox.Dropbox(token)
+            dbx.users_get_current_account()  # 接続テスト
+            return dbx
+        except Exception as e:
+            st.warning(f"Dropbox接続エラー: {e}")
+            return None
+    return None
+
+def get_dropbox_farms(dbx):
+    """Dropboxから農場フォルダ一覧を取得"""
+    try:
+        result = dbx.files_list_folder("")
+        farms = [entry.name for entry in result.entries if isinstance(entry, dropbox.files.FolderMetadata)]
+        return sorted(farms)
+    except Exception as e:
+        st.error(f"農場フォルダの取得に失敗: {e}")
+        return []
+
+def get_dropbox_files(dbx, farm_name):
+    """指定農場フォルダ内のファイル一覧を取得"""
+    try:
+        result = dbx.files_list_folder(f"/{farm_name}")
+        files = {}
+        for entry in result.entries:
+            if isinstance(entry, dropbox.files.FileMetadata):
+                name_lower = entry.name.lower()
+                if '種付記録' in entry.name and name_lower.endswith('.csv'):
+                    files['csv'] = entry.path_lower
+                elif 'p2' in name_lower and '初産' not in entry.name and name_lower.endswith('.xlsx'):
+                    files['p2'] = entry.path_lower
+                elif '初産' in entry.name and name_lower.endswith('.xlsx'):
+                    files['gilt_p2'] = entry.path_lower
+                elif '採精' in entry.name and name_lower.endswith('.xlsx'):
+                    files['semen'] = entry.path_lower
+        return files
+    except Exception as e:
+        st.error(f"ファイル一覧の取得に失敗: {e}")
+        return {}
+
+def download_dropbox_file(dbx, file_path):
+    """Dropboxからファイルをダウンロード"""
+    try:
+        metadata, response = dbx.files_download(file_path)
+        return BytesIO(response.content)
+    except Exception as e:
+        st.error(f"ファイルのダウンロードに失敗: {e}")
+        return None
 
 @st.cache_resource
 def get_google_sheet():
@@ -695,10 +759,18 @@ st.write("養豚場の受胎率管理システム")
 # ===================
 st.sidebar.header("📁 データ選択")
 
-# データソースの選択
+# Dropbox接続
+dbx = get_dropbox_client()
+
+# データソースの選択肢を設定
+data_sources = ["CSVをアップロード", "過去データから選択"]
+if dbx:
+    data_sources.insert(0, "Dropboxから読み込み")
+    st.sidebar.success("✅ Dropbox接続済み")
+
 data_source = st.sidebar.radio(
     "データの読み込み方法",
-    ["CSVをアップロード", "過去データから選択"],
+    data_sources,
     index=0
 )
 
@@ -706,7 +778,83 @@ df = None
 week_id = None
 farm_name = None
 
-if data_source == "CSVをアップロード":
+if data_source == "Dropboxから読み込み":
+    dropbox_farms = get_dropbox_farms(dbx)
+    
+    if dropbox_farms:
+        selected_farm = st.sidebar.selectbox(
+            "農場を選択（Dropbox）",
+            dropbox_farms
+        )
+        
+        if selected_farm:
+            with st.spinner(f"📂 {selected_farm}のファイルを確認中..."):
+                files = get_dropbox_files(dbx, selected_farm)
+            
+            if files.get('csv'):
+                st.sidebar.caption(f"✅ 種付記録CSV: 検出")
+            else:
+                st.sidebar.caption(f"❌ 種付記録CSV: 未検出")
+            
+            if files.get('p2'):
+                st.sidebar.caption(f"✅ P2値（経産）: 検出")
+            if files.get('gilt_p2'):
+                st.sidebar.caption(f"✅ P2値（初産）: 検出")
+            if files.get('semen'):
+                st.sidebar.caption(f"✅ 採精レポート: 検出")
+            
+            if st.sidebar.button("📥 データを読み込む"):
+                if files.get('csv'):
+                    with st.spinner("📂 Dropboxからデータを読み込み中..."):
+                        # CSV読み込み
+                        csv_data = download_dropbox_file(dbx, files['csv'])
+                        if csv_data:
+                            df = pd.read_csv(csv_data, encoding='utf-8-sig')
+                            df['受胎'] = df['妊娠鑑定結果'] == '受胎確定'
+                            start_date = pd.to_datetime(df['種付日'].min())
+                            week_id = start_date.strftime('%Y-%m-%d')
+                            farm_name = selected_farm
+                            
+                            # P2値（経産）
+                            if files.get('p2'):
+                                p2_data = download_dropbox_file(dbx, files['p2'])
+                                if p2_data:
+                                    uploaded_p2 = p2_data
+                            
+                            # P2値（初産）
+                            if files.get('gilt_p2'):
+                                gilt_p2_data = download_dropbox_file(dbx, files['gilt_p2'])
+                                if gilt_p2_data:
+                                    uploaded_gilt_p2 = gilt_p2_data
+                            
+                            # 採精レポート
+                            if files.get('semen'):
+                                semen_data = download_dropbox_file(dbx, files['semen'])
+                                if semen_data:
+                                    uploaded_semen = semen_data
+                            
+                            st.session_state['dropbox_df'] = df
+                            st.session_state['dropbox_week_id'] = week_id
+                            st.session_state['dropbox_farm_name'] = farm_name
+                            st.session_state['dropbox_uploaded_p2'] = uploaded_p2 if files.get('p2') else None
+                            st.session_state['dropbox_uploaded_gilt_p2'] = uploaded_gilt_p2 if files.get('gilt_p2') else None
+                            st.session_state['dropbox_uploaded_semen'] = uploaded_semen if files.get('semen') else None
+                            st.rerun()
+                else:
+                    st.sidebar.error("種付記録CSVが見つかりません")
+    else:
+        st.sidebar.info("Dropboxに農場フォルダがありません")
+    
+    # セッションステートからデータを復元
+    if 'dropbox_df' in st.session_state:
+        df = st.session_state['dropbox_df']
+        week_id = st.session_state['dropbox_week_id']
+        farm_name = st.session_state['dropbox_farm_name']
+        uploaded_p2 = st.session_state.get('dropbox_uploaded_p2')
+        uploaded_gilt_p2 = st.session_state.get('dropbox_uploaded_gilt_p2')
+        uploaded_semen = st.session_state.get('dropbox_uploaded_semen')
+
+elif data_source == "CSVをアップロード":
     uploaded_csv = st.sidebar.file_uploader(
         "種付記録CSV（Porker出力）",
         type=['csv']
