@@ -351,6 +351,325 @@ def display_centered_table(df, height=None):
     else:
         st.markdown(html, unsafe_allow_html=True)
 
+def generate_print_html(df, week_id, farm_name, start_date, end_date, comments_data, 
+                        df_parity, semen_stats, df_not_pregnant, week_comment,
+                        p2_data=None, gilt_p2_data=None, semen_report=None):
+    """印刷用HTMLを生成"""
+    import matplotlib.pyplot as plt
+    import matplotlib
+    matplotlib.use('Agg')
+    import base64
+    from io import BytesIO
+    
+    # 日本語フォント設定
+    plt.rcParams['font.family'] = ['Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic', 'Meiryo', 'sans-serif']
+    
+    # 受胎率計算
+    total = len(df)
+    pregnant = df['受胎'].sum()
+    fertility_rate = pregnant / total * 100
+    
+    df_sow = df[df['産次'].astype(int) >= 2]
+    sow_rate = df_sow['受胎'].sum() / len(df_sow) * 100 if len(df_sow) > 0 else 0
+    
+    df_gilt = df[df['産次'].astype(int) == 1]
+    gilt_rate = df_gilt['受胎'].sum() / len(df_gilt) * 100 if len(df_gilt) > 0 else 0
+    
+    # 不受胎リストデータ準備
+    not_pregnant_html = ""
+    if len(df_not_pregnant) > 0:
+        display_data = []
+        for idx, row in df_not_pregnant.iterrows():
+            pig_id = str(row['母豚番号'])
+            detail_key = f"{farm_name}_{week_id}_{pig_id}"
+            details = comments_data["pig_details"].get(detail_key, {})
+            
+            display_data.append({
+                '種付日': row['種付日'],
+                '母豚番号': pig_id,
+                '精液': row['雄豚・精液・あて雄'],
+                '産次': row['産次'],
+                '分娩舎': details.get('分娩舎', ''),
+                'ロット': details.get('ロット', ''),
+                '哺乳日数': details.get('哺乳日数', ''),
+                'P2値': details.get('P2値', ''),
+                'コメント': details.get('コメント', '')
+            })
+        df_display = pd.DataFrame(display_data)
+        not_pregnant_html = df_display.to_html(index=False)
+    else:
+        not_pregnant_html = "<p>不受胎なし</p>"
+    
+    # グラフ生成関数
+    def create_bar_chart_base64(data_df, title, color, x_col='P2値(mm)', y_col='頭数'):
+        """棒グラフを生成してBase64エンコードした画像を返す"""
+        fig, ax = plt.subplots(figsize=(8, 4))
+        
+        x_values = data_df[x_col].astype(str).tolist()
+        y_values = data_df[y_col].tolist()
+        
+        bars = ax.bar(x_values, y_values, color=color, edgecolor='white')
+        
+        ax.set_xlabel('P2値')
+        ax.set_ylabel('頭数')
+        ax.set_title(title)
+        
+        # 値をバーの上に表示
+        for bar, val in zip(bars, y_values):
+            if val > 0:
+                ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.1, 
+                       str(int(val)), ha='center', va='bottom', fontsize=8)
+        
+        plt.tight_layout()
+        
+        # Base64エンコード
+        buffer = BytesIO()
+        plt.savefig(buffer, format='png', dpi=150, bbox_inches='tight')
+        buffer.seek(0)
+        img_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+        plt.close(fig)
+        
+        return img_base64
+    
+    # P2値（経産）HTML
+    p2_html = ""
+    if p2_data:
+        try:
+            chart_base64 = create_bar_chart_base64(
+                p2_data['table'], 
+                '離乳時P2値分布（経産）', 
+                '#1f77b4'
+            )
+            p2_html = f"""
+            <h2>【離乳時P2値分布（経産）】</h2>
+            <p>離乳日: {p2_data['weaning_date']} / ロット: {p2_data['lot']} / 平均P2値: {p2_data['average']:.1f}mm</p>
+            <div class="chart-container">
+                <img src="data:image/png;base64,{chart_base64}" alt="P2値分布（経産）" style="max-width: 500px; width: 65%;">
+                <div class="table-side">
+                    {p2_data['table'].to_html(index=False)}
+                </div>
+            </div>
+            """
+        except Exception as e:
+            p2_html = f"""
+            <h2>【離乳時P2値分布（経産）】</h2>
+            <p>離乳日: {p2_data['weaning_date']} / ロット: {p2_data['lot']} / 平均P2値: {p2_data['average']:.1f}mm</p>
+            {p2_data['table'].to_html(index=False)}
+            """
+    
+    # P2値（初産）HTML
+    gilt_p2_html = ""
+    if gilt_p2_data:
+        try:
+            chart_base64 = create_bar_chart_base64(
+                gilt_p2_data['table'], 
+                '種付時P2値分布（初産）', 
+                '#ff7f0e'
+            )
+            gilt_p2_html = f"""
+            <h2>【種付時P2値分布（初産）】</h2>
+            <p>種付開始週: {week_id} / 平均P2値: {gilt_p2_data['average']:.1f}mm</p>
+            <div class="chart-container">
+                <img src="data:image/png;base64,{chart_base64}" alt="P2値分布（初産）" style="max-width: 500px; width: 65%;">
+                    {gilt_p2_data['table'].to_html(index=False)}
+                </div>
+            </div>
+            """
+        except Exception as e:
+            gilt_p2_html = f"""
+            <h2>【種付時P2値分布（初産）】</h2>
+            <p>種付開始週: {week_id} / 平均P2値: {gilt_p2_data['average']:.1f}mm</p>
+            {gilt_p2_data['table'].to_html(index=False)}
+            """
+    
+    # 採精レポートHTML
+    semen_html = ""
+    if semen_report is not None and len(semen_report) > 0:
+        semen_html = f"""
+        <h2>【採精レポート】</h2>
+        {semen_report.to_html(index=False)}
+        """
+    
+    # 週コメントHTML
+    comment_html = ""
+    if week_comment:
+        comment_html = f"""
+        <h2>【週のコメント】</h2>
+        <div class="comment-box">{week_comment.replace(chr(10), '<br>')}</div>
+        """
+    
+    html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <title>鑑定落ちリスト_{farm_name}_{week_id}</title>
+        <style>
+            @media print {{
+                body {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+            }}
+            body {{
+                font-family: "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Noto Sans JP", "メイリオ", sans-serif;
+                font-size: 11px;
+                line-height: 1.4;
+                color: #333;
+                max-width: 1000px;
+                margin: 0 auto;
+                padding: 20px;
+            }}
+            h1 {{
+                font-size: 20px;
+                text-align: center;
+                margin-bottom: 5px;
+                color: #1f77b4;
+            }}
+            h2 {{
+                font-size: 14px;
+                margin-top: 20px;
+                margin-bottom: 10px;
+                padding-bottom: 3px;
+                border-bottom: 2px solid #1f77b4;
+            }}
+            .header-info {{
+                text-align: center;
+                margin-bottom: 20px;
+            }}
+            .summary-container {{
+                display: flex;
+                justify-content: center;
+                gap: 30px;
+                margin: 20px 0;
+            }}
+            .summary-item {{
+                text-align: center;
+                padding: 15px 25px;
+                background-color: #f0f2f6;
+                border-radius: 10px;
+            }}
+            .summary-item .label {{ font-size: 12px; color: #666; }}
+            .summary-item .rate {{ font-size: 28px; font-weight: bold; }}
+            .summary-item .count {{ font-size: 14px; color: #333; }}
+            .rate-total {{ color: #1f77b4; }}
+            .rate-sow {{ color: #2ca02c; }}
+            .rate-gilt {{ color: #ff7f0e; }}
+            .two-column {{
+                display: flex;
+                gap: 30px;
+            }}
+            .two-column > div {{ flex: 1; }}
+            .chart-container {{
+                display: flex;
+                gap: 15px;
+                align-items: flex-start;
+                margin: 10px 0;
+            }}
+            .chart-container img {{
+                flex-shrink: 0;
+                max-width: 500px;
+                width: 65%;
+            }}
+            .table-side {{
+                flex: 1;
+                font-size: 9px;
+            }}
+            .table-side table {{
+                font-size: 9px;
+            }}
+            table {{
+                width: 100%;
+                border-collapse: collapse;
+                margin: 10px 0;
+                font-size: 10px;
+            }}
+            th, td {{
+                border: 1px solid #ddd;
+                padding: 6px;
+                text-align: center;
+            }}
+            th {{
+                background-color: #f0f2f6;
+                font-weight: bold;
+            }}
+            .comment-box {{
+                background-color: #f9f9f9;
+                border: 1px solid #ddd;
+                border-radius: 5px;
+                padding: 15px;
+                margin-top: 10px;
+                white-space: pre-wrap;
+            }}
+            .print-button {{
+                position: fixed;
+                top: 10px;
+                right: 10px;
+                padding: 10px 20px;
+                background-color: #1f77b4;
+                color: white;
+                border: none;
+                border-radius: 5px;
+                cursor: pointer;
+                font-size: 14px;
+            }}
+            .print-button:hover {{ background-color: #1565a0; }}
+            @media print {{
+                .print-button {{ display: none; }}
+            }}
+        </style>
+    </head>
+    <body>
+        <button class="print-button" onclick="window.print()">🖨️ 印刷 / PDF保存</button>
+        
+        <h1>🐷 鑑定落ちリスト</h1>
+        
+        <div class="header-info">
+            <p><strong>📅 種付期間:</strong> {start_date.strftime('%Y-%m-%d')} ～ {end_date.strftime('%Y-%m-%d')}</p>
+            <p><strong>🏠 農場:</strong> {farm_name}</p>
+            <p><strong>作成日:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>
+        </div>
+        
+        <h2>【受胎率サマリー】</h2>
+        <div class="summary-container">
+            <div class="summary-item">
+                <div class="label">合計</div>
+                <div class="rate rate-total">{fertility_rate:.1f}%</div>
+                <div class="count">{int(pregnant)} / {total} 頭</div>
+            </div>
+            <div class="summary-item">
+                <div class="label">経産</div>
+                <div class="rate rate-sow">{sow_rate:.1f}%</div>
+                <div class="count">{int(df_sow['受胎'].sum())} / {len(df_sow)} 頭</div>
+            </div>
+            <div class="summary-item">
+                <div class="label">初産(Gilt)</div>
+                <div class="rate rate-gilt">{gilt_rate:.1f}%</div>
+                <div class="count">{int(df_gilt['受胎'].sum())} / {len(df_gilt)} 頭</div>
+            </div>
+        </div>
+        
+        <div class="two-column">
+            <div>
+                <h2>【産次別受胎率】</h2>
+                {df_parity.to_html(index=False)}
+            </div>
+            <div>
+                <h2>【精液別受胎率】</h2>
+                {semen_stats.to_html(index=False)}
+            </div>
+        </div>
+        
+        <h2>【不受胎リスト】</h2>
+        {not_pregnant_html}
+        
+        {p2_html}
+        {gilt_p2_html}
+        {semen_html}
+        {comment_html}
+        
+    </body>
+    </html>
+    """
+    return html
+
 # ===================
 # スプレッドシート接続
 # ===================
@@ -851,7 +1170,7 @@ if df is not None and week_id is not None:
     # ===================
     st.divider()
     
-    col_save, col_status = st.columns([1, 3])
+    col_save, col_pdf, col_status = st.columns([1, 1, 2])
     
     with col_save:
         if st.button("💾 データを保存", type="primary"):
@@ -877,6 +1196,124 @@ if df is not None and week_id is not None:
                     st.cache_resource.clear()
             else:
                 st.error("スプレッドシートに接続できません")
+
+    with col_pdf:
+        # P2値データの準備
+        p2_data = None
+        gilt_p2_data = None
+        semen_report = None
+        
+        # 経産P2値
+        if uploaded_p2 is not None:
+            try:
+                df_p2 = pd.read_excel(uploaded_p2, header=1)
+                df_p2['離乳日_str'] = df_p2['離乳日'].astype(str).str[:10]
+                df_sow_for_p2 = df[df['産次'].astype(int) >= 2]
+                if len(df_sow_for_p2) > 0 and df_sow_for_p2['前回離乳日'].notna().any():
+                    most_common_weaning = df_sow_for_p2['前回離乳日'].value_counts().idxmax()
+                    matched_p2 = df_p2[df_p2['離乳日_str'] == str(most_common_weaning)[:10]]
+                    if len(matched_p2) > 0:
+                        p2_row = matched_p2.iloc[0]
+                        p2_columns = [str(i) for i in range(4, 21)]
+                        p2_table_data = []
+                        total_count = 0
+                        weighted_sum = 0
+                        for p2 in p2_columns:
+                            if p2 in p2_row.index:
+                                count = int(p2_row[p2])
+                                if count > 0:
+                                    total_count += count
+                                    weighted_sum += int(p2) * count
+                                    p2_table_data.append({'P2値(mm)': f"{p2}mm", '頭数': count})
+                        if total_count > 0:
+                            p2_data = {
+                                'weaning_date': most_common_weaning,
+                                'lot': p2_row['離乳ロット'],
+                                'average': weighted_sum / total_count,
+                                'table': pd.DataFrame(p2_table_data)
+                            }
+            except:
+                pass
+        
+        # 初産P2値
+        if uploaded_gilt_p2 is not None:
+            try:
+                df_gilt_p2 = pd.read_excel(uploaded_gilt_p2, header=1)
+                df_gilt_p2['種付開始週_str'] = df_gilt_p2['種付開始週'].astype(str).str[:10]
+                matched_gilt_p2 = df_gilt_p2[df_gilt_p2['種付開始週_str'] == week_id]
+                if len(matched_gilt_p2) > 0:
+                    gilt_p2_row = matched_gilt_p2.iloc[0]
+                    p2_columns = [str(i) for i in range(4, 21)]
+                    gilt_p2_table_data = []
+                    gilt_total_count = 0
+                    gilt_weighted_sum = 0
+                    for p2 in p2_columns:
+                        if p2 in gilt_p2_row.index:
+                            count = int(gilt_p2_row[p2])
+                            if count > 0:
+                                gilt_total_count += count
+                                gilt_weighted_sum += int(p2) * count
+                                gilt_p2_table_data.append({'P2値(mm)': f"{p2}mm", '頭数': count})
+                    if gilt_total_count > 0:
+                        gilt_p2_data = {
+                            'average': gilt_weighted_sum / gilt_total_count,
+                            'table': pd.DataFrame(gilt_p2_table_data)
+                        }
+            except:
+                pass
+        
+        # 採精レポート
+        if uploaded_semen is not None:
+            try:
+                df_semen = pd.read_excel(uploaded_semen, header=2)
+                df_semen['採精日'] = pd.to_datetime(df_semen['採精日'])
+                days_since_monday = start_date.weekday()
+                if days_since_monday == 0:
+                    previous_sunday = start_date - timedelta(days=1)
+                else:
+                    previous_sunday = start_date - timedelta(days=days_since_monday + 1)
+                days_until_saturday = 5 - start_date.weekday()
+                if days_until_saturday < 0:
+                    days_until_saturday += 7
+                saturday_of_week = start_date + timedelta(days=days_until_saturday)
+                df_semen_week = df_semen[
+                    (df_semen['採精日'] >= previous_sunday) & 
+                    (df_semen['採精日'] <= saturday_of_week)
+                ]
+                if len(df_semen_week) > 0:
+                    display_cols = ['採精日', '個体番号', '採精量', '精子数', '備考']
+                    semen_report = df_semen_week[display_cols].copy()
+                    semen_report['採精日'] = semen_report['採精日'].dt.strftime('%Y-%m-%d')
+                    semen_report['備考'] = semen_report['備考'].fillna('').astype(str)
+                    semen_report.columns = ['採精日', '個体番号', '採精量(ml)', '精子数(億)', '備考']
+            except:
+                pass
+        
+        # 印刷用HTML生成
+        print_html = generate_print_html(
+            df=df,
+            week_id=week_id,
+            farm_name=farm_name,
+            start_date=start_date,
+            end_date=end_date,
+            comments_data=comments_data,
+            df_parity=df_parity,
+            semen_stats=semen_stats,
+            df_not_pregnant=df_not_pregnant,
+            week_comment=week_comment,
+            p2_data=p2_data,
+            gilt_p2_data=gilt_p2_data,
+            semen_report=semen_report
+        )
+        
+        # HTMLダウンロードボタン
+        st.download_button(
+            label="📄 印刷用ページ",
+            data=print_html,
+            file_name=f"鑑定落ちリスト_{farm_name}_{week_id}.html",
+            mime="text/html",
+            help="ダウンロード後、ブラウザで開いて印刷（Cmd+P）でPDF保存できます"
+        )
     
     with col_status:
         is_saved = farm_name in farm_weeks and week_id in farm_weeks.get(farm_name, [])
@@ -884,6 +1321,7 @@ if df is not None and week_id is not None:
             st.caption(f"✅ この週のデータは保存済みです")
         else:
             st.caption(f"⚠️ この週のデータはまだ保存されていません")
+
 else:
     st.info("👈 サイドバーからデータを選択してください")
     
