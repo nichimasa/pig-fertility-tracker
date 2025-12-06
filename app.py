@@ -891,28 +891,6 @@ if data_source == "Dropboxから読み込み":
         uploaded_semen = st.session_state.get('dropbox_uploaded_semen')
 
 elif data_source == "CSVをアップロード":
-    
-    # セッションステートからデータを復元
-    if 'dropbox_df' in st.session_state:
-        df = st.session_state['dropbox_df']
-        week_id = st.session_state['dropbox_week_id']
-        farm_name = st.session_state['dropbox_farm_name']
-        uploaded_p2 = st.session_state.get('dropbox_uploaded_p2')
-        uploaded_gilt_p2 = st.session_state.get('dropbox_uploaded_gilt_p2')
-        uploaded_semen = st.session_state.get('dropbox_uploaded_semen')
-
-elif data_source == "CSVをアップロード":
-    
-    # セッションステートからデータを復元
-    if 'dropbox_df' in st.session_state:
-        df = st.session_state['dropbox_df']
-        week_id = st.session_state['dropbox_week_id']
-        farm_name = st.session_state['dropbox_farm_name']
-        uploaded_p2 = st.session_state.get('dropbox_uploaded_p2')
-        uploaded_gilt_p2 = st.session_state.get('dropbox_uploaded_gilt_p2')
-        uploaded_semen = st.session_state.get('dropbox_uploaded_semen')
-
-elif data_source == "CSVをアップロード":
     uploaded_csv = st.sidebar.file_uploader(
         "種付記録CSV（Porker出力）",
         type=['csv']
