@@ -24,18 +24,32 @@ CREDENTIALS_FILE = "credentials.json"
 # ===================
 # Dropbox設定
 # ===================
-DROPBOX_ACCESS_TOKEN = os.environ.get("DROPBOX_ACCESS_TOKEN", "")
+DROPBOX_APP_KEY = os.environ.get("DROPBOX_APP_KEY", "")
+DROPBOX_APP_SECRET = os.environ.get("DROPBOX_APP_SECRET", "")
+DROPBOX_REFRESH_TOKEN = os.environ.get("DROPBOX_REFRESH_TOKEN", "")
 
 def get_dropbox_client():
-    """Dropboxクライアントを取得"""
-    token = DROPBOX_ACCESS_TOKEN
-    # Streamlit Cloudの場合はSecretsから取得
-    if not token and 'dropbox' in st.secrets:
-        token = st.secrets["dropbox"]["access_token"]
+    """Dropboxクライアントを取得（リフレッシュトークン使用）"""
+    app_key = DROPBOX_APP_KEY
+    app_secret = DROPBOX_APP_SECRET
+    refresh_token = DROPBOX_REFRESH_TOKEN
     
-    if token:
+    # Streamlit Cloudの場合はSecretsから取得
+    try:
+        if 'dropbox' in st.secrets:
+            app_key = st.secrets["dropbox"].get("app_key", app_key)
+            app_secret = st.secrets["dropbox"].get("app_secret", app_secret)
+            refresh_token = st.secrets["dropbox"].get("refresh_token", refresh_token)
+    except:
+        pass  # ローカル環境でSecretsがない場合は無視
+    
+    if app_key and app_secret and refresh_token:
         try:
-            dbx = dropbox.Dropbox(token)
+            dbx = dropbox.Dropbox(
+                app_key=app_key,
+                app_secret=app_secret,
+                oauth2_refresh_token=refresh_token
+            )
             dbx.users_get_current_account()  # 接続テスト
             return dbx
         except Exception as e:
