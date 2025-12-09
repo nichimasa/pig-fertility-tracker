@@ -143,7 +143,8 @@ def get_or_create_worksheet(spreadsheet, sheet_name):
         worksheet = spreadsheet.add_worksheet(title=sheet_name, rows=1000, cols=30)
     return worksheet
 
-def load_data_from_sheet(spreadsheet):
+@st.cache_data(ttl=300)
+def load_data_from_sheet(_spreadsheet):
     """スプレッドシートからデータを読み込み"""
     data = {"pig_details": {}, "repeat_breeding": {}, "week_comments": {}}
     
@@ -441,6 +442,46 @@ def display_centered_table(df, height=None):
         st.markdown(f'<div style="height:{height}px; overflow-y:auto;">{html}</div>', unsafe_allow_html=True)
     else:
         st.markdown(html, unsafe_allow_html=True)
+
+@st.fragment
+def pig_details_input_form(df_not_pregnant, farm_name, week_id, comments_data):
+    """不受胎母豚の詳細入力フォーム（フラグメント化で再実行を防止）"""
+    
+    if 'temp_pig_details' not in st.session_state:
+        st.session_state.temp_pig_details = {}
+    
+    st.write("**不受胎母豚の詳細情報を入力**")
+    
+    for idx, row in df_not_pregnant.iterrows():
+        pig_id = str(row['母豚番号'])
+        detail_key = f"{farm_name}_{week_id}_{pig_id}"
+        saved_details = comments_data["pig_details"].get(detail_key, {})
+        
+        # セッションステートから既存の入力値を取得（あれば）
+        if detail_key in st.session_state.temp_pig_details:
+            saved_details = st.session_state.temp_pig_details[detail_key]
+    
+        with st.expander(f"🐷 {pig_id}（{row['産次']}産 / {row['雄豚・精液・あて雄']}）", expanded=False):
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                bunben = st.text_input("分娩舎", value=saved_details.get("分娩舎", ""), key=f"bunben_{detail_key}", placeholder="例: 1号")
+            with col2:
+                lot = st.text_input("ロット", value=saved_details.get("ロット", ""), key=f"lot_{detail_key}", placeholder="例: 2-3")
+            with col3:
+                honyugs = st.text_input("哺乳日数", value=saved_details.get("哺乳日数", ""), key=f"honyu_{detail_key}", placeholder="例: 21")
+            with col4:
+                p2_value = st.text_input("P2値", value=saved_details.get("P2値", ""), key=f"p2_{detail_key}", placeholder="例: 12")
+            
+            comment = st.text_input("コメント", value=saved_details.get("コメント", ""), key=f"comment_{detail_key}", placeholder="廃用理由、治療歴、助産歴など")
+            
+            st.session_state.temp_pig_details[detail_key] = {
+                "分娩舎": to_halfwidth(bunben),
+                "ロット": to_halfwidth(lot),
+                "哺乳日数": to_halfwidth(honyugs),
+                "P2値": to_halfwidth(p2_value),
+                "コメント": comment
+            }
 
 def generate_print_html(df, week_id, farm_name, start_date, end_date, comments_data, 
                         df_parity, semen_stats, df_not_pregnant, week_comment,
@@ -784,6 +825,14 @@ st.write("養豚場の受胎率管理システム")
 # ===================
 # サイドバー
 # ===================
+# セッション状態の初期化
+if 'temp_pig_details' not in st.session_state:
+    st.session_state.temp_pig_details = {}
+if 'temp_repeat_breeding' not in st.session_state:
+    st.session_state.temp_repeat_breeding = {}
+if 'temp_week_comment' not in st.session_state:
+    st.session_state.temp_week_comment = ""
+
 st.sidebar.header("📁 データ選択")
 
 # Dropbox接続
@@ -800,6 +849,21 @@ data_source = st.sidebar.radio(
     data_sources,
     index=0
 )
+
+# 編集モードの管理
+if 'edit_mode' not in st.session_state:
+    st.session_state.edit_mode = False
+
+# データソースが変わったら編集モードをリセット
+if 'previous_data_source' not in st.session_state:
+    st.session_state.previous_data_source = data_source
+elif st.session_state.previous_data_source != data_source:
+    st.session_state.edit_mode = False
+    st.session_state.previous_data_source = data_source
+
+# 過去データ以外は常に編集モード
+if data_source != "過去データから選択":
+    st.session_state.edit_mode = True
 
 df = None
 week_id = None
@@ -946,6 +1010,16 @@ elif data_source == "過去データから選択":
                         df = load_breeding_records(spreadsheet, week_id, farm_name)
                         if df is not None:
                             df['受胎'] = df['妊娠鑑定結果'] == '受胎確定'
+                        # 編集モード切り替えボタン
+                    if not st.session_state.edit_mode:
+                        if st.sidebar.button("✏️ 編集する"):
+                            st.session_state.edit_mode = True
+                            st.rerun()
+                    else:
+                        if st.sidebar.button("👁️ 閲覧モードに戻る"):
+                            st.session_state.edit_mode = False
+                            st.cache_data.clear()
+                            st.rerun()
             else:
                 st.sidebar.info("この農場の保存データがありません")
     else:
@@ -1087,28 +1161,29 @@ if df is not None and week_id is not None:
         df_parity = pd.DataFrame(parity_data)
         display_centered_table(df_parity)
         
-        # 再発付け入力フォーム
-        st.write("**再発付けの入力**")
-        col_r1, col_r2 = st.columns(2)
-        with col_r1:
-            repeat_total_input = st.text_input(
-                "再発付け種付頭数",
-                value=saved_repeat.get("種付", ""),
-                key="repeat_total",
-                placeholder="例: 5"
-            )
-        with col_r2:
-            repeat_pregnant_input = st.text_input(
-                "再発付け受胎頭数",
-                value=saved_repeat.get("受胎", ""),
-                key="repeat_pregnant",
-                placeholder="例: 4"
-            )
-        
-        st.session_state.temp_repeat_breeding = {
-            "種付": to_halfwidth(repeat_total_input),
-            "受胎": to_halfwidth(repeat_pregnant_input)
-        }
+       # 再発付け入力フォーム（編集モード時のみ）
+        if st.session_state.edit_mode:
+            st.write("**再発付けの入力**")
+            col_r1, col_r2 = st.columns(2)
+            with col_r1:
+                repeat_total_input = st.text_input(
+                    "再発付け種付頭数",
+                    value=saved_repeat.get("種付", ""),
+                    key="repeat_total",
+                    placeholder="例: 5"
+                )
+            with col_r2:
+                repeat_pregnant_input = st.text_input(
+                    "再発付け受胎頭数",
+                    value=saved_repeat.get("受胎", ""),
+                    key="repeat_pregnant",
+                    placeholder="例: 4"
+                )
+            
+            st.session_state.temp_repeat_breeding = {
+                "種付": to_halfwidth(repeat_total_input),
+                "受胎": to_halfwidth(repeat_pregnant_input)
+            }
     
     with col_right:
         st.subheader("【精液別受胎率】")
@@ -1131,47 +1206,21 @@ if df is not None and week_id is not None:
     df_not_pregnant = df[df['受胎'] == False].copy()
     
     if len(df_not_pregnant) > 0:
-        if 'temp_pig_details' not in st.session_state:
-            st.session_state.temp_pig_details = {}
-        
-        st.write("**不受胎母豚の詳細情報を入力**")
-        
-        for idx, row in df_not_pregnant.iterrows():
-            pig_id = str(row['母豚番号'])
-            detail_key = f"{farm_name}_{week_id}_{pig_id}"
-            
-            saved_details = comments_data["pig_details"].get(detail_key, {})
-            
-            with st.expander(f"🐷 {pig_id}（{row['産次']}産 / {row['雄豚・精液・あて雄']}）", expanded=False):
-                col1, col2, col3, col4 = st.columns(4)
-                
-                with col1:
-                    bunben = st.text_input("分娩舎", value=saved_details.get("分娩舎", ""), key=f"bunben_{detail_key}", placeholder="例: 1号")
-                with col2:
-                    lot = st.text_input("ロット", value=saved_details.get("ロット", ""), key=f"lot_{detail_key}", placeholder="例: 2-3")
-                with col3:
-                    honyugs = st.text_input("哺乳日数", value=saved_details.get("哺乳日数", ""), key=f"honyu_{detail_key}", placeholder="例: 21")
-                with col4:
-                    p2_value = st.text_input("P2値", value=saved_details.get("P2値", ""), key=f"p2_{detail_key}", placeholder="例: 12")
-                
-                comment = st.text_input("コメント", value=saved_details.get("コメント", ""), key=f"comment_{detail_key}", placeholder="廃用理由、治療歴、助産歴など")
-                
-                st.session_state.temp_pig_details[detail_key] = {
-                    "分娩舎": to_halfwidth(bunben),
-                    "ロット": to_halfwidth(lot),
-                    "哺乳日数": to_halfwidth(honyugs),
-                    "P2値": to_halfwidth(p2_value),
-                    "コメント": comment
-                }
+        # 詳細入力フォーム（編集モード時のみ）
+        if st.session_state.edit_mode:
+            pig_details_input_form(df_not_pregnant, farm_name, week_id, comments_data)
         
         st.write("**不受胎一覧表**")
+        if st.session_state.edit_mode:
+            st.caption("💡 入力内容は「データを保存」後に反映されます")
         
         display_data = []
         for idx, row in df_not_pregnant.iterrows():
             pig_id = str(row['母豚番号'])
             detail_key = f"{farm_name}_{week_id}_{pig_id}"
             
-            details = st.session_state.temp_pig_details.get(detail_key, comments_data["pig_details"].get(detail_key, {}))
+            # 保存済みデータを表示（入力中のデータは保存後に反映される）
+            details = comments_data["pig_details"].get(detail_key, {})
             
             hormone = row['投与ホルモン'] if pd.notna(row.get('投与ホルモン')) else ''
             days_after_weaning = row['離乳後交配日数'] if pd.notna(row.get('離乳後交配日数')) else ''
@@ -1361,28 +1410,42 @@ if df is not None and week_id is not None:
     comment_key = f"{farm_name}_{week_id}"
     saved_week_comment = comments_data["week_comments"].get(comment_key, "")
     
-    if 'temp_week_comment' not in st.session_state:
-        st.session_state.temp_week_comment = saved_week_comment
-    
-    week_comment = st.text_area(
-        "この週の鑑定落ちリストに対するコメント",
-        value=saved_week_comment,
-        height=150,
-        placeholder="必要妊豚在庫の確保状況、不受胎の原因分析、今後の対応など",
-        key="week_comment_input"
-    )
-    st.session_state.temp_week_comment = week_comment
+    if st.session_state.edit_mode:
+        # 編集モード：入力欄を表示
+        week_comment = st.text_area(
+            "この週の鑑定落ちリストに対するコメント",
+            value=saved_week_comment,
+            height=150,
+            placeholder="必要妊豚在庫の確保状況、不受胎の原因分析、今後の対応など",
+            key="week_comment_input"
+        )
+        st.session_state.temp_week_comment = week_comment
+    else:
+        # 閲覧モード：保存済みコメントを表示
+        week_comment = saved_week_comment
+        if week_comment:
+            # コメントを表形式で表示（左詰め）
+            st.markdown(f"""
+            <div style="border: 1px solid #ddd; padding: 15px; background-color: white; color: #333; border-radius: 5px; margin: 10px 0; text-align: left; white-space: pre-wrap; font-size: 14px;">
+{week_comment}
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.info("コメントはありません")
     
     # ===================
     # 保存ボタン
     # ===================
     st.divider()
     
-    col_save, col_pdf, col_status = st.columns([1, 1, 2])
+    if st.session_state.edit_mode:
+        col_save, col_pdf, col_status = st.columns([1, 1, 2])
+    else:
+        col_pdf, col_status = st.columns([1, 3])
     
-    with col_save:
-        if st.button("💾 データを保存", type="primary"):
-            if spreadsheet:
+    if st.session_state.edit_mode:
+        with col_save:
+            if st.button("💾 データを保存", type="primary"):
                 with st.spinner("💾 データを保存中...しばらくお待ちください"):
                     # 種付記録を保存
                     save_breeding_records(spreadsheet, df.drop(columns=['受胎']), week_id, farm_name)
@@ -1390,20 +1453,24 @@ if df is not None and week_id is not None:
                     # キーのプレフィックス
                     key_prefix = f"{farm_name}_{week_id}"
                     
+                    # 週コメントをセッションステートから取得
+                    current_week_comment = st.session_state.get('temp_week_comment', '')
+                    
                     # 手入力データを保存
                     save_data = {
                         "pig_details": st.session_state.temp_pig_details if 'temp_pig_details' in st.session_state else {},
                         "repeat_breeding": {key_prefix: st.session_state.temp_repeat_breeding} if 'temp_repeat_breeding' in st.session_state else {},
-                        "week_comments": {key_prefix: week_comment}
+                        "week_comments": {key_prefix: current_week_comment}
                     }
                     
                     success = save_data_to_sheet(spreadsheet, save_data, week_id, farm_name)
-                
-                if success:
-                    st.success("✅ データを保存しました！")
-                    st.cache_resource.clear()
-            else:
-                st.error("スプレッドシートに接続できません")
+                    
+                    if success:
+                        st.success("✅ データを保存しました！")
+                        st.cache_resource.clear()
+                        st.cache_data.clear()
+                    else:
+                        st.error("データの保存に失敗しました")
 
     with col_pdf:
         # P2値データの準備
