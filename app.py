@@ -5,7 +5,6 @@ import json
 import os
 import gspread
 from google.oauth2.service_account import Credentials
-import dropbox
 from io import BytesIO
 
 # ページの設定
@@ -20,95 +19,6 @@ st.set_page_config(
 # ===================
 SPREADSHEET_ID = "1xJCrmUNqdAX0CNR_Mm7zenvgR-StP5d9VVRSe0CBnXM"
 CREDENTIALS_FILE = "credentials.json"
-
-# ===================
-# Dropbox設定
-# ===================
-DROPBOX_APP_KEY = os.environ.get("DROPBOX_APP_KEY", "")
-DROPBOX_APP_SECRET = os.environ.get("DROPBOX_APP_SECRET", "")
-DROPBOX_REFRESH_TOKEN = os.environ.get("DROPBOX_REFRESH_TOKEN", "")
-
-def get_dropbox_client():
-    """Dropboxクライアントを取得（リフレッシュトークン使用）"""
-    app_key = DROPBOX_APP_KEY
-    app_secret = DROPBOX_APP_SECRET
-    refresh_token = DROPBOX_REFRESH_TOKEN
-    
-    # Streamlit Cloudの場合はSecretsから取得
-    try:
-        if 'dropbox' in st.secrets:
-            app_key = st.secrets["dropbox"].get("app_key", app_key)
-            app_secret = st.secrets["dropbox"].get("app_secret", app_secret)
-            refresh_token = st.secrets["dropbox"].get("refresh_token", refresh_token)
-    except:
-        pass  # ローカル環境でSecretsがない場合は無視
-    
-    if app_key and app_secret and refresh_token:
-        try:
-            dbx = dropbox.Dropbox(
-                app_key=app_key,
-                app_secret=app_secret,
-                oauth2_refresh_token=refresh_token
-            )
-            dbx.users_get_current_account()  # 接続テスト
-            return dbx
-        except Exception as e:
-            st.warning(f"Dropbox接続エラー: {e}")
-            return None
-    return None
-
-def get_dropbox_farms(dbx):
-    """Dropboxから農場フォルダ一覧を取得"""
-    try:
-        result = dbx.files_list_folder("")
-        farms = [entry.name for entry in result.entries if isinstance(entry, dropbox.files.FolderMetadata)]
-        return sorted(farms)
-    except Exception as e:
-        st.error(f"農場フォルダの取得に失敗: {e}")
-        return []
-
-def get_dropbox_files(dbx, farm_name):
-    """指定農場フォルダ内のファイル一覧を取得"""
-    try:
-        result = dbx.files_list_folder(f"/{farm_name}")
-        files = {
-            'csv_list': [],  # CSVファイルのリスト
-            'p2': None,
-            'gilt_p2': None,
-            'semen': None
-        }
-        for entry in result.entries:
-            if isinstance(entry, dropbox.files.FileMetadata):
-                name_lower = entry.name.lower()
-                if '種付記録' in entry.name and name_lower.endswith('.csv'):
-                    files['csv_list'].append({
-                        'name': entry.name,
-                        'path': entry.path_lower,
-                        'modified': entry.server_modified
-                    })
-                elif 'p2' in name_lower and '初産' not in entry.name and name_lower.endswith('.xlsx'):
-                    files['p2'] = entry.path_lower
-                elif '初産' in entry.name and name_lower.endswith('.xlsx'):
-                    files['gilt_p2'] = entry.path_lower
-                elif '採精' in entry.name and name_lower.endswith('.xlsx'):
-                    files['semen'] = entry.path_lower
-        
-        # CSVリストを更新日時の降順でソート（新しい順）
-        files['csv_list'].sort(key=lambda x: x['modified'], reverse=True)
-        
-        return files
-    except Exception as e:
-        st.error(f"ファイル一覧の取得に失敗: {e}")
-        return {'csv_list': [], 'p2': None, 'gilt_p2': None, 'semen': None}
-    
-def download_dropbox_file(dbx, file_path):
-    """Dropboxからファイルをダウンロード"""
-    try:
-        metadata, response = dbx.files_download(file_path)
-        return BytesIO(response.content)
-    except Exception as e:
-        st.error(f"ファイルのダウンロードに失敗: {e}")
-        return None
 
 @st.cache_resource
 def get_google_sheet():
@@ -186,6 +96,125 @@ def load_data_from_sheet(_spreadsheet):
         st.warning(f"データ読み込み中にエラーが発生しました: {e}")
     
     return data
+
+def parse_date_flexible(date_value, year=2025):
+    """柔軟な日付パース（7月4日 や 2025-07-04 など）"""
+    if pd.isna(date_value) or date_value == '':
+        return None
+    
+    date_str = str(date_value)
+    
+    # すでにdatetime型の場合
+    if isinstance(date_value, (pd.Timestamp, datetime)):
+        return date_value.strftime('%Y-%m-%d')
+    
+    # 2025-07-04 形式
+    if '-' in date_str and len(date_str) >= 10:
+        return date_str[:10]
+    
+    # 7月4日 形式
+    import re
+    match = re.match(r'(\d+)月(\d+)日', date_str)
+    if match:
+        month = int(match.group(1))
+        day = int(match.group(2))
+        return f"{year}-{month:02d}-{day:02d}"
+    
+    # 7/4 形式
+    match = re.match(r'(\d+)/(\d+)', date_str)
+    if match:
+        month = int(match.group(1))
+        day = int(match.group(2))
+        return f"{year}-{month:02d}-{day:02d}"
+    
+    return date_str
+
+
+def load_p2_data_from_sheet(spreadsheet, farm_name, weaning_date):
+    """スプレッドシートからP2値（経産）を読み込み"""
+    try:
+        ws = spreadsheet.worksheet("P2値_経産")
+        data = ws.get_all_records()
+        
+        # 検索対象の日付を正規化
+        target_date = parse_date_flexible(weaning_date)
+        if target_date is None:
+            return None
+        
+        for record in data:
+            if record.get("農場") == farm_name:
+                record_date = parse_date_flexible(record.get("離乳日", ""))
+                if record_date == target_date:
+                    return record
+        return None
+    except Exception as e:
+        return None
+
+
+def load_gilt_p2_data_from_sheet(spreadsheet, farm_name, week_id):
+    """スプレッドシートからP2値（初産）を読み込み"""
+    try:
+        ws = spreadsheet.worksheet("P2値_初産")
+        data = ws.get_all_records()
+        
+        # 検索対象の日付を正規化
+        target_date = parse_date_flexible(week_id)
+        if target_date is None:
+            return None
+        
+        for record in data:
+            if record.get("農場") == farm_name:
+                record_date = parse_date_flexible(record.get("種付開始週", ""))
+                if record_date == target_date:
+                    return record
+        return None
+    except Exception as e:
+        return None
+
+
+def load_semen_report_from_sheet(spreadsheet, start_date):
+    """スプレッドシートから採精レポートを読み込み"""
+    try:
+        ws = spreadsheet.worksheet("採精レポート")
+        data = ws.get_all_records()
+        
+        if not data:
+            return None
+        
+        # 日付でフィルタリング（種付開始週の前日曜〜土曜）
+        if isinstance(start_date, str):
+            start_date = pd.to_datetime(start_date)
+        
+        days_since_monday = start_date.weekday()
+        if days_since_monday == 0:
+            previous_sunday = start_date - timedelta(days=1)
+        else:
+            previous_sunday = start_date - timedelta(days=days_since_monday + 1)
+        
+        days_until_saturday = 5 - start_date.weekday()
+        if days_until_saturday < 0:
+            days_until_saturday += 7
+        saturday_of_week = start_date + timedelta(days=days_until_saturday)
+        
+        filtered_data = []
+        for record in data:
+            try:
+                # 日付を正規化
+                record_date_str = parse_date_flexible(record.get("採精日"))
+                if record_date_str:
+                    record_date = pd.to_datetime(record_date_str)
+                    if previous_sunday <= record_date <= saturday_of_week:
+                        record['採精日'] = record_date_str
+                        filtered_data.append(record)
+            except:
+                pass
+        
+        if filtered_data:
+            df = pd.DataFrame(filtered_data)
+            return df
+        return None
+    except Exception as e:
+        return None
 
 def save_breeding_records(spreadsheet, df, week_id, farm_name):
     """種付記録をスプレッドシートに保存（一括処理）"""
@@ -835,14 +864,8 @@ if 'temp_week_comment' not in st.session_state:
 
 st.sidebar.header("📁 データ選択")
 
-# Dropbox接続
-dbx = get_dropbox_client()
-
 # データソースの選択肢を設定
 data_sources = ["CSVをアップロード", "過去データから選択"]
-if dbx:
-    data_sources.insert(0, "Dropboxから読み込み")
-    st.sidebar.success("✅ Dropbox接続済み")
 
 data_source = st.sidebar.radio(
     "データの読み込み方法",
@@ -869,106 +892,7 @@ df = None
 week_id = None
 farm_name = None
 
-if data_source == "Dropboxから読み込み":
-    dropbox_farms = get_dropbox_farms(dbx)
-    
-    if dropbox_farms:
-        selected_farm = st.sidebar.selectbox(
-            "農場を選択（Dropbox）",
-            dropbox_farms
-        )
-        
-        if selected_farm:
-            with st.spinner(f"📂 {selected_farm}のファイルを確認中..."):
-                files = get_dropbox_files(dbx, selected_farm)
-            
-            # CSVファイル選択
-            if files['csv_list']:
-                csv_options = [f['name'] for f in files['csv_list']]
-                selected_csv = st.sidebar.selectbox(
-                    "種付記録CSVを選択",
-                    csv_options,
-                    format_func=lambda x: x
-                )
-                
-                # 選択されたCSVのパスを取得
-                selected_csv_path = None
-                for f in files['csv_list']:
-                    if f['name'] == selected_csv:
-                        selected_csv_path = f['path']
-                        break
-                
-                st.sidebar.caption(f"✅ 種付記録CSV: {len(files['csv_list'])}件検出")
-            else:
-                selected_csv_path = None
-                st.sidebar.caption(f"❌ 種付記録CSV: 未検出")
-            
-            if files.get('p2'):
-                st.sidebar.caption(f"✅ P2値（経産）: 検出")
-            else:
-                st.sidebar.caption(f"❌ P2値（経産）: 未検出")
-            if files.get('gilt_p2'):
-                st.sidebar.caption(f"✅ P2値（初産）: 検出")
-            else:
-                st.sidebar.caption(f"❌ P2値（初産）: 未検出")
-            if files.get('semen'):
-                st.sidebar.caption(f"✅ 採精レポート: 検出")
-            else:
-                st.sidebar.caption(f"❌ 採精レポート: 未検出")
-            
-            if st.sidebar.button("📥 データを読み込む"):
-                if selected_csv_path:
-                    with st.spinner("📂 Dropboxからデータを読み込み中..."):
-                        # CSV読み込み
-                        csv_data = download_dropbox_file(dbx, selected_csv_path)
-                        if csv_data:
-                            df = pd.read_csv(csv_data, encoding='utf-8-sig')
-                            df['受胎'] = df['妊娠鑑定結果'] == '受胎確定'
-                            start_date = pd.to_datetime(df['種付日'].min())
-                            week_id = start_date.strftime('%Y-%m-%d')
-                            farm_name = selected_farm
-                            
-                            st.session_state['dropbox_df'] = df
-                            st.session_state['dropbox_week_id'] = week_id
-                            st.session_state['dropbox_farm_name'] = farm_name
-                            
-                            # P2値（経産）
-                            if files.get('p2'):
-                                p2_data = download_dropbox_file(dbx, files['p2'])
-                                st.session_state['dropbox_uploaded_p2'] = p2_data
-                            else:
-                                st.session_state['dropbox_uploaded_p2'] = None
-                            
-                            # P2値（初産）
-                            if files.get('gilt_p2'):
-                                gilt_p2_data = download_dropbox_file(dbx, files['gilt_p2'])
-                                st.session_state['dropbox_uploaded_gilt_p2'] = gilt_p2_data
-                            else:
-                                st.session_state['dropbox_uploaded_gilt_p2'] = None
-                            
-                            # 採精レポート
-                            if files.get('semen'):
-                                semen_data = download_dropbox_file(dbx, files['semen'])
-                                st.session_state['dropbox_uploaded_semen'] = semen_data
-                            else:
-                                st.session_state['dropbox_uploaded_semen'] = None
-                            
-                            st.rerun()
-                else:
-                    st.sidebar.error("種付記録CSVを選択してください")
-    else:
-        st.sidebar.info("Dropboxに農場フォルダがありません")
-    
-    # セッションステートからデータを復元
-    if 'dropbox_df' in st.session_state:
-        df = st.session_state['dropbox_df']
-        week_id = st.session_state['dropbox_week_id']
-        farm_name = st.session_state['dropbox_farm_name']
-        uploaded_p2 = st.session_state.get('dropbox_uploaded_p2')
-        uploaded_gilt_p2 = st.session_state.get('dropbox_uploaded_gilt_p2')
-        uploaded_semen = st.session_state.get('dropbox_uploaded_semen')
-
-elif data_source == "CSVをアップロード":
+if data_source == "CSVをアップロード":
     uploaded_csv = st.sidebar.file_uploader(
         "種付記録CSV（Porker出力）",
         type=['csv']
@@ -1024,36 +948,6 @@ elif data_source == "過去データから選択":
                 st.sidebar.info("この農場の保存データがありません")
     else:
         st.sidebar.info("保存済みのデータがありません")
-
-# P2値・採精レポートの初期化とアップロード
-if data_source == "Dropboxから読み込み":
-    # Dropboxの場合はセッションステートから取得
-    if 'dropbox_uploaded_p2' not in st.session_state:
-        uploaded_p2 = None
-    if 'dropbox_uploaded_gilt_p2' not in st.session_state:
-        uploaded_gilt_p2 = None
-    if 'dropbox_uploaded_semen' not in st.session_state:
-        uploaded_semen = None
-else:
-    # 手動アップロードの場合
-    with st.sidebar.expander("📊 追加データ", expanded=False):
-        uploaded_p2 = st.file_uploader(
-            "P2値集計表（経産・Excel）",
-            type=['xlsx'],
-            key="p2_uploader"
-        )
-
-        uploaded_gilt_p2 = st.file_uploader(
-            "P2値集計表（初産・Excel）",
-            type=['xlsx'],
-            key="gilt_p2_uploader"
-        )
-
-        uploaded_semen = st.file_uploader(
-            "採精レポート（Excel）",
-            type=['xlsx'],
-            key="semen_uploader"
-        )
 
 # ===================
 # メインコンテンツ
@@ -1250,94 +1144,112 @@ if df is not None and week_id is not None:
     else:
         st.success("不受胎なし")
     
-    # ===================
+   # ===================
     # P2値分布（経産）
     # ===================
-    if uploaded_p2 is not None:
-        st.subheader("【離乳時P2値分布（経産）】")
+    st.subheader("【離乳時P2値分布（経産）】")
+    
+    # スプレッドシートまたはアップロードファイルからデータを取得
+    p2_row = None
+    most_common_weaning = None
+    
+    df_sow_for_p2 = df[df['産次'].astype(int) >= 2]
+    if len(df_sow_for_p2) > 0 and df_sow_for_p2['前回離乳日'].notna().any():
+        most_common_weaning = df_sow_for_p2['前回離乳日'].value_counts().idxmax()
         
-        df_p2 = pd.read_excel(uploaded_p2, header=1)
-        df_p2['離乳日_str'] = df_p2['離乳日'].astype(str).str[:10]
+        # まずスプレッドシートから読み込み
+        if spreadsheet:
+            p2_record = load_p2_data_from_sheet(spreadsheet, farm_name, most_common_weaning)
+            if p2_record:
+                p2_row = p2_record
+    
+    if p2_row and most_common_weaning:
+        lot_value = p2_row.get('離乳ロット', '')
+        st.write(f"**離乳日:** {most_common_weaning} / **ロット:** {lot_value}")
         
-        df_sow_for_p2 = df[df['産次'].astype(int) >= 2]
-        if len(df_sow_for_p2) > 0 and df_sow_for_p2['前回離乳日'].notna().any():
-            most_common_weaning = df_sow_for_p2['前回離乳日'].value_counts().idxmax()
-            matched_p2 = df_p2[df_p2['離乳日_str'] == str(most_common_weaning)[:10]]
+        p2_columns = [str(i) for i in range(4, 21)]
+        p2_data = []
+        total_count = 0
+        weighted_sum = 0
+        
+        for p2 in p2_columns:
+            if p2 in p2_row:
+                try:
+                    count = int(p2_row[p2])
+                    total_count += count
+                    weighted_sum += int(p2) * count
+                    p2_data.append({'P2値(mm)': int(p2), '頭数': count})
+                except:
+                    pass
+        
+        if total_count > 0:
+            average_p2 = weighted_sum / total_count
             
-            if len(matched_p2) > 0:
-                p2_row = matched_p2.iloc[0]
-                st.write(f"**離乳日:** {most_common_weaning} / **ロット:** {p2_row['離乳ロット']}")
+            col_chart, col_table = st.columns(2)
+            
+            with col_chart:
+                import altair as alt
+                df_p2_chart = pd.DataFrame(p2_data)
+                df_p2_chart = df_p2_chart.sort_values('P2値(mm)')
+                df_p2_chart['P2値'] = df_p2_chart['P2値(mm)'].astype(str) + 'mm'
                 
-                p2_columns = [str(i) for i in range(4, 21)]
-                p2_data = []
-                total_count = 0
-                weighted_sum = 0
-                
-                for p2 in p2_columns:
-                    if p2 in p2_row.index:
-                        count = int(p2_row[p2])
-                        total_count += count
-                        weighted_sum += int(p2) * count
-                        p2_data.append({'P2値(mm)': int(p2), '頭数': count})
-                
-                average_p2 = weighted_sum / total_count if total_count > 0 else 0
-                
-                col_chart, col_table = st.columns(2)
-                
-                with col_chart:
-                    import altair as alt
-                    df_p2_chart = pd.DataFrame(p2_data)
-                    df_p2_chart = df_p2_chart.sort_values('P2値(mm)')
-                    df_p2_chart['P2値'] = df_p2_chart['P2値(mm)'].astype(str) + 'mm'
-                    
-                    chart = alt.Chart(df_p2_chart).mark_bar().encode(
-                        x=alt.X('P2値:N', sort=df_p2_chart['P2値'].tolist(), title='P2値'),
-                        y=alt.Y('頭数:Q', title='頭数'),
-                        tooltip=['P2値', '頭数']
-                    ).properties(height=300)
-                    st.altair_chart(chart, use_container_width=True)
-                
-                with col_table:
-                    df_p2_table = pd.DataFrame(p2_data)
-                    df_p2_table = df_p2_table[df_p2_table['頭数'] > 0]
-                    df_p2_table = df_p2_table.sort_values('P2値(mm)')
-                    df_p2_table['P2値(mm)'] = df_p2_table['P2値(mm)'].astype(str) + 'mm'
-                    display_centered_table(df_p2_table, height=300)
-                
-                st.write(f"**合計:** {total_count}頭 / **平均P2値:** {average_p2:.1f}mm")
-            else:
-                st.warning(f"離乳日 {most_common_weaning} に対応するP2値データが見つかりません")
+                chart = alt.Chart(df_p2_chart).mark_bar().encode(
+                    x=alt.X('P2値:N', sort=df_p2_chart['P2値'].tolist(), title='P2値'),
+                    y=alt.Y('頭数:Q', title='頭数'),
+                    tooltip=['P2値', '頭数']
+                ).properties(height=300)
+                st.altair_chart(chart, use_container_width=True)
+            
+            with col_table:
+                df_p2_table = pd.DataFrame(p2_data)
+                df_p2_table = df_p2_table[df_p2_table['頭数'] > 0]
+                df_p2_table = df_p2_table.sort_values('P2値(mm)')
+                df_p2_table['P2値(mm)'] = df_p2_table['P2値(mm)'].astype(str) + 'mm'
+                display_centered_table(df_p2_table, height=300)
+            
+            st.write(f"**合計:** {total_count}頭 / **平均P2値:** {average_p2:.1f}mm")
         else:
-            st.warning("経産豚の離乳データがありません")
+            st.info("P2値データがありません")
+    else:
+        if most_common_weaning:
+            st.info(f"離乳日 {most_common_weaning} に対応するP2値データがスプレッドシートに登録されていません")
+        else:
+            st.info("経産豚の離乳データがありません")
     
     # ===================
     # P2値分布（初産）
     # ===================
-    if uploaded_gilt_p2 is not None:
-        st.subheader("【種付時P2値分布（初産）】")
+    st.subheader("【種付時P2値分布（初産）】")
+    
+    # スプレッドシートまたはアップロードファイルからデータを取得
+    gilt_p2_row = None
+    
+    # まずスプレッドシートから読み込み
+    if spreadsheet:
+        gilt_p2_record = load_gilt_p2_data_from_sheet(spreadsheet, farm_name, week_id)
+        if gilt_p2_record:
+            gilt_p2_row = gilt_p2_record
+    
+    if gilt_p2_row:
+        st.write(f"**種付開始週:** {week_id}")
         
-        df_gilt_p2 = pd.read_excel(uploaded_gilt_p2, header=1)
-        df_gilt_p2['種付開始週_str'] = df_gilt_p2['種付開始週'].astype(str).str[:10]
+        p2_columns = [str(i) for i in range(4, 21)]
+        gilt_p2_data = []
+        gilt_total_count = 0
+        gilt_weighted_sum = 0
         
-        matched_gilt_p2 = df_gilt_p2[df_gilt_p2['種付開始週_str'] == week_id]
-        
-        if len(matched_gilt_p2) > 0:
-            gilt_p2_row = matched_gilt_p2.iloc[0]
-            st.write(f"**種付開始週:** {week_id}")
-            
-            p2_columns = [str(i) for i in range(4, 21)]
-            gilt_p2_data = []
-            gilt_total_count = 0
-            gilt_weighted_sum = 0
-            
-            for p2 in p2_columns:
-                if p2 in gilt_p2_row.index:
+        for p2 in p2_columns:
+            if p2 in gilt_p2_row:
+                try:
                     count = int(gilt_p2_row[p2])
                     gilt_total_count += count
                     gilt_weighted_sum += int(p2) * count
                     gilt_p2_data.append({'P2値(mm)': int(p2), '頭数': count})
-            
-            gilt_average_p2 = gilt_weighted_sum / gilt_total_count if gilt_total_count > 0 else 0
+                except:
+                    pass
+        
+        if gilt_total_count > 0:
+            gilt_average_p2 = gilt_weighted_sum / gilt_total_count
             
             col_chart_gilt, col_table_gilt = st.columns(2)
             
@@ -1363,44 +1275,57 @@ if df is not None and week_id is not None:
             
             st.write(f"**合計:** {gilt_total_count}頭 / **平均P2値:** {gilt_average_p2:.1f}mm")
         else:
-            st.warning(f"種付開始週 {week_id} に対応する初産P2値データが見つかりません")
+            st.info("初産P2値データがありません")
+    else:
+        st.info(f"種付開始週 {week_id} に対応する初産P2値データがスプレッドシートに登録されていません")
     
     # ===================
-    # 採精レポート
+    # 採精レポート（花泉1号・花泉2号のみ）
     # ===================
-    if uploaded_semen is not None:
+    if farm_name in ["花泉1号", "花泉2号"]:
         st.subheader("【採精レポート】")
         
-        df_semen = pd.read_excel(uploaded_semen, header=2)
-        df_semen['採精日'] = pd.to_datetime(df_semen['採精日'])
+        # スプレッドシートまたはアップロードファイルからデータを取得
+        df_semen_week = None
         
-        days_since_monday = start_date.weekday()
-        if days_since_monday == 0:
-            previous_sunday = start_date - timedelta(days=1)
-        else:
-            previous_sunday = start_date - timedelta(days=days_since_monday + 1)
+        # まずスプレッドシートから読み込み
+        if spreadsheet:
+            df_semen_week = load_semen_report_from_sheet(spreadsheet, start_date)
         
-        days_until_saturday = 5 - start_date.weekday()
-        if days_until_saturday < 0:
-            days_until_saturday += 7
-        saturday_of_week = start_date + timedelta(days=days_until_saturday)
-        
-        st.write(f"**対象期間:** {previous_sunday.strftime('%Y-%m-%d')} ～ {saturday_of_week.strftime('%Y-%m-%d')}")
-        
-        df_semen_week = df_semen[
-            (df_semen['採精日'] >= previous_sunday) & 
-            (df_semen['採精日'] <= saturday_of_week)
-        ]
-        
-        if len(df_semen_week) > 0:
+        if df_semen_week is not None and len(df_semen_week) > 0:
+            # 対象期間を計算
+            days_since_monday = start_date.weekday()
+            if days_since_monday == 0:
+                previous_sunday = start_date - timedelta(days=1)
+            else:
+                previous_sunday = start_date - timedelta(days=days_since_monday + 1)
+            
+            days_until_saturday = 5 - start_date.weekday()
+            if days_until_saturday < 0:
+                days_until_saturday += 7
+            saturday_of_week = start_date + timedelta(days=days_until_saturday)
+            
+            st.write(f"**対象期間:** {previous_sunday.strftime('%Y-%m-%d')} ～ {saturday_of_week.strftime('%Y-%m-%d')}")
+            
+            # 表示用に整形
             display_cols = ['採精日', '個体番号', '採精量', '精子数', '備考']
-            df_semen_display = df_semen_week[display_cols].copy()
-            df_semen_display['採精日'] = df_semen_display['採精日'].dt.strftime('%Y-%m-%d')
-            df_semen_display['備考'] = df_semen_display['備考'].fillna('').astype(str)
-            df_semen_display.columns = ['採精日', '個体番号', '採精量(ml)', '精子数(億)', '備考']
+            available_cols = [col for col in display_cols if col in df_semen_week.columns]
+            df_semen_display = df_semen_week[available_cols].copy()
+            
+            # 採精日を文字列に変換
+            if '採精日' in df_semen_display.columns:
+                df_semen_display['採精日'] = pd.to_datetime(df_semen_display['採精日']).dt.strftime('%Y-%m-%d')
+            
+            # 備考のNaNを空文字に
+            if '備考' in df_semen_display.columns:
+                df_semen_display['備考'] = df_semen_display['備考'].fillna('').astype(str)
+            
+            # 列名を変更
+            df_semen_display.columns = ['採精日', '個体番号', '採精量(ml)', '精子数(億)', '備考'][:len(available_cols)]
+            
             display_centered_table(df_semen_display)
         else:
-            st.info("対象期間の採精データがありません")
+            st.info("この週の採精レポートがスプレッドシートに登録されていません")
     
     # ===================
     # 週全体のコメント
@@ -1473,94 +1398,85 @@ if df is not None and week_id is not None:
                         st.error("データの保存に失敗しました")
 
     with col_pdf:
-        # P2値データの準備
+        # P2値データの準備（スプレッドシートから取得）
         p2_data = None
         gilt_p2_data = None
         semen_report = None
         
         # 経産P2値
-        if uploaded_p2 is not None:
-            try:
-                df_p2 = pd.read_excel(uploaded_p2, header=1)
-                df_p2['離乳日_str'] = df_p2['離乳日'].astype(str).str[:10]
-                df_sow_for_p2 = df[df['産次'].astype(int) >= 2]
-                if len(df_sow_for_p2) > 0 and df_sow_for_p2['前回離乳日'].notna().any():
-                    most_common_weaning = df_sow_for_p2['前回離乳日'].value_counts().idxmax()
-                    matched_p2 = df_p2[df_p2['離乳日_str'] == str(most_common_weaning)[:10]]
-                    if len(matched_p2) > 0:
-                        p2_row = matched_p2.iloc[0]
+        try:
+            df_sow_for_p2 = df[df['産次'].astype(int) >= 2]
+            if len(df_sow_for_p2) > 0 and df_sow_for_p2['前回離乳日'].notna().any():
+                most_common_weaning = df_sow_for_p2['前回離乳日'].value_counts().idxmax()
+                
+                if spreadsheet:
+                    p2_record = load_p2_data_from_sheet(spreadsheet, farm_name, most_common_weaning)
+                    if p2_record:
                         p2_columns = [str(i) for i in range(4, 21)]
                         p2_table_data = []
                         total_count = 0
                         weighted_sum = 0
                         for p2 in p2_columns:
-                            if p2 in p2_row.index:
-                                count = int(p2_row[p2])
-                                if count > 0:
-                                    total_count += count
-                                    weighted_sum += int(p2) * count
-                                    p2_table_data.append({'P2値(mm)': f"{p2}mm", '頭数': count})
+                            if p2 in p2_record:
+                                try:
+                                    count = int(p2_record[p2])
+                                    if count > 0:
+                                        total_count += count
+                                        weighted_sum += int(p2) * count
+                                        p2_table_data.append({'P2値(mm)': f"{p2}mm", '頭数': count})
+                                except:
+                                    pass
                         if total_count > 0:
                             p2_data = {
                                 'weaning_date': most_common_weaning,
-                                'lot': p2_row['離乳ロット'],
+                                'lot': p2_record.get('離乳ロット', ''),
                                 'average': weighted_sum / total_count,
                                 'table': pd.DataFrame(p2_table_data)
                             }
-            except:
-                pass
+        except:
+            pass
         
         # 初産P2値
-        if uploaded_gilt_p2 is not None:
-            try:
-                df_gilt_p2 = pd.read_excel(uploaded_gilt_p2, header=1)
-                df_gilt_p2['種付開始週_str'] = df_gilt_p2['種付開始週'].astype(str).str[:10]
-                matched_gilt_p2 = df_gilt_p2[df_gilt_p2['種付開始週_str'] == week_id]
-                if len(matched_gilt_p2) > 0:
-                    gilt_p2_row = matched_gilt_p2.iloc[0]
+        try:
+            if spreadsheet:
+                gilt_p2_record = load_gilt_p2_data_from_sheet(spreadsheet, farm_name, week_id)
+                if gilt_p2_record:
                     p2_columns = [str(i) for i in range(4, 21)]
                     gilt_p2_table_data = []
                     gilt_total_count = 0
                     gilt_weighted_sum = 0
                     for p2 in p2_columns:
-                        if p2 in gilt_p2_row.index:
-                            count = int(gilt_p2_row[p2])
-                            if count > 0:
-                                gilt_total_count += count
-                                gilt_weighted_sum += int(p2) * count
-                                gilt_p2_table_data.append({'P2値(mm)': f"{p2}mm", '頭数': count})
+                        if p2 in gilt_p2_record:
+                            try:
+                                count = int(gilt_p2_record[p2])
+                                if count > 0:
+                                    gilt_total_count += count
+                                    gilt_weighted_sum += int(p2) * count
+                                    gilt_p2_table_data.append({'P2値(mm)': f"{p2}mm", '頭数': count})
+                            except:
+                                pass
                     if gilt_total_count > 0:
                         gilt_p2_data = {
                             'average': gilt_weighted_sum / gilt_total_count,
                             'table': pd.DataFrame(gilt_p2_table_data)
                         }
-            except:
-                pass
+        except:
+            pass
         
-        # 採精レポート
-        if uploaded_semen is not None:
+        # 採精レポート（花泉1号・花泉2号のみ）
+        if farm_name in ["花泉1号", "花泉2号"]:
             try:
-                df_semen = pd.read_excel(uploaded_semen, header=2)
-                df_semen['採精日'] = pd.to_datetime(df_semen['採精日'])
-                days_since_monday = start_date.weekday()
-                if days_since_monday == 0:
-                    previous_sunday = start_date - timedelta(days=1)
-                else:
-                    previous_sunday = start_date - timedelta(days=days_since_monday + 1)
-                days_until_saturday = 5 - start_date.weekday()
-                if days_until_saturday < 0:
-                    days_until_saturday += 7
-                saturday_of_week = start_date + timedelta(days=days_until_saturday)
-                df_semen_week = df_semen[
-                    (df_semen['採精日'] >= previous_sunday) & 
-                    (df_semen['採精日'] <= saturday_of_week)
-                ]
-                if len(df_semen_week) > 0:
-                    display_cols = ['採精日', '個体番号', '採精量', '精子数', '備考']
-                    semen_report = df_semen_week[display_cols].copy()
-                    semen_report['採精日'] = semen_report['採精日'].dt.strftime('%Y-%m-%d')
-                    semen_report['備考'] = semen_report['備考'].fillna('').astype(str)
-                    semen_report.columns = ['採精日', '個体番号', '採精量(ml)', '精子数(億)', '備考']
+                if spreadsheet:
+                    df_semen_week = load_semen_report_from_sheet(spreadsheet, start_date)
+                    if df_semen_week is not None and len(df_semen_week) > 0:
+                        display_cols = ['採精日', '個体番号', '採精量', '精子数', '備考']
+                        available_cols = [col for col in display_cols if col in df_semen_week.columns]
+                        semen_report = df_semen_week[available_cols].copy()
+                        if '採精日' in semen_report.columns:
+                            semen_report['採精日'] = pd.to_datetime(semen_report['採精日']).dt.strftime('%Y-%m-%d')
+                        if '備考' in semen_report.columns:
+                            semen_report['備考'] = semen_report['備考'].fillna('').astype(str)
+                        semen_report.columns = ['採精日', '個体番号', '採精量(ml)', '精子数(億)', '備考'][:len(available_cols)]
             except:
                 pass
         
