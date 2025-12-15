@@ -10,7 +10,6 @@ from io import BytesIO
 # ページの設定
 st.set_page_config(
     page_title="鑑定落ちリスト",
-    page_icon="🐷",
     layout="wide"
 )
 
@@ -490,7 +489,7 @@ def pig_details_input_form(df_not_pregnant, farm_name, week_id, comments_data):
         if detail_key in st.session_state.temp_pig_details:
             saved_details = st.session_state.temp_pig_details[detail_key]
     
-        with st.expander(f"🐷 {pig_id}（{row['産次']}産 / {row['雄豚・精液・あて雄']}）", expanded=False):
+        with st.expander(f"{pig_id}（{row['産次']}産 / {row['雄豚・精液・あて雄']}）", expanded=False):
             col1, col2, col3, col4 = st.columns(4)
             
             with col1:
@@ -780,11 +779,11 @@ def generate_print_html(df, week_id, farm_name, start_date, end_date, comments_d
     <body>
         <button class="print-button" onclick="window.print()">🖨️ 印刷 / PDF保存</button>
         
-        <h1>🐷 鑑定落ちリスト</h1>
+        <h1>鑑定落ちリスト</h1>
         
         <div class="header-info">
-            <p><strong>📅 種付期間:</strong> {start_date.strftime('%Y-%m-%d')} ～ {end_date.strftime('%Y-%m-%d')}</p>
-            <p><strong>🏠 農場:</strong> {farm_name}</p>
+            <p><strong>種付期間:</strong> {start_date.strftime('%Y-%m-%d')} ～ {end_date.strftime('%Y-%m-%d')}</p>
+            <p><strong>農場:</strong> {farm_name}</p>
             <p><strong>作成日:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>
         </div>
         
@@ -838,7 +837,7 @@ spreadsheet = get_google_sheet()
 
 if spreadsheet:
     st.sidebar.success("✅ Googleスプレッドシート接続済み")
-    with st.spinner("📊 保存データを読み込み中..."):
+    with st.spinner("保存データを読み込み中..."):
         comments_data = load_data_from_sheet(spreadsheet)
         farm_weeks, all_farms = get_saved_farms_and_weeks(spreadsheet)
 else:
@@ -848,8 +847,7 @@ else:
     all_farms = []
 
 # タイトル
-st.title("🐷 鑑定落ちリスト")
-st.write("養豚場の受胎率管理システム")
+st.title("鑑定落ちリスト")
 
 # ===================
 # サイドバー
@@ -936,11 +934,11 @@ elif data_source == "過去データから選択":
                             df['受胎'] = df['妊娠鑑定結果'] == '受胎確定'
                         # 編集モード切り替えボタン
                     if not st.session_state.edit_mode:
-                        if st.sidebar.button("✏️ 編集する"):
+                        if st.sidebar.button("編集する"):
                             st.session_state.edit_mode = True
                             st.rerun()
                     else:
-                        if st.sidebar.button("👁️ 閲覧モードに戻る"):
+                        if st.sidebar.button("閲覧モードに戻る"):
                             st.session_state.edit_mode = False
                             st.cache_data.clear()
                             st.rerun()
@@ -957,8 +955,8 @@ if df is not None and week_id is not None:
     end_date = pd.to_datetime(df['種付日'].max())
     
     # ヘッダー情報
-    st.header(f"📅 種付期間: {start_date.strftime('%Y-%m-%d')} ～ {end_date.strftime('%Y-%m-%d')}")
-    st.subheader(f"🏠 農場: {farm_name}")
+    st.header(f"種付期間: {start_date.strftime('%Y-%m-%d')} ～ {end_date.strftime('%Y-%m-%d')}")
+    st.subheader(f"農場: {farm_name}")
     st.caption(f"作成日: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     
     # ===================
@@ -1499,7 +1497,7 @@ if df is not None and week_id is not None:
         
         # HTMLダウンロードボタン
         st.download_button(
-            label="📄 印刷用ページ",
+            label="印刷用ページ",
             data=print_html,
             file_name=f"鑑定落ちリスト_{farm_name}_{week_id}.html",
             mime="text/html",
@@ -1522,16 +1520,22 @@ else:
     **方法1: 新しいCSVをアップロード**
     1. サイドバーで「CSVをアップロード」を選択
     2. 種付記録CSVをアップロード
+    4. 必定な情報を手入力
     3. レポートを確認し、「データを保存」をクリック
     
     **方法2: 過去データを閲覧**
     1. サイドバーで「過去データから選択」を選択
-    2. 閲覧したい週を選ぶ
+    2. 閲覧したい農場・週を選ぶ
     3. レポートが表示されます
+    4. 編集が必要であれば「編集する」を選択し編集
+    5. レポートを確認し、「データを保存」をクリック
     
-    **追加データ（任意）**
-    - P2値集計表（経産・初産）
-    - 採精レポート
+    **PDFレポート出力方法**
+    1. 方法1または方法2のいずれかでレポートを作成後、最下部にある「印刷用ページ」を選択
+    2. HTML形式でレポートがダウンロードされます
+    3. ダウンロードされたレポートをブラウザで開く
+    4. 「印刷/PDF」を選択しPDFで保存する
+    
     """)
     
     if all_farms:
