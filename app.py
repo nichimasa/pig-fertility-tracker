@@ -521,8 +521,41 @@ def generate_print_html(df, week_id, farm_name, start_date, end_date, comments_d
     import base64
     from io import BytesIO
     
-    # 日本語フォント設定
-    plt.rcParams['font.family'] = ['Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic', 'Meiryo', 'sans-serif']
+   # 日本語フォント設定
+    import matplotlib
+    matplotlib.use('Agg')
+    
+    # 利用可能な日本語フォントを探す
+    from matplotlib import font_manager
+    
+    # フォント候補リスト
+    font_candidates = [
+        'Hiragino Sans',
+        'Hiragino Kaku Gothic ProN', 
+        'Yu Gothic',
+        'Meiryo',
+        'MS Gothic',
+        'Noto Sans CJK JP',
+        'IPAGothic',
+        'IPAPGothic',
+        'VL Gothic',
+        'Takao Gothic',
+        'DejaVu Sans'
+    ]
+    
+    # 利用可能なフォントを探す
+    available_fonts = [f.name for f in font_manager.fontManager.ttflist]
+    selected_font = None
+    for font in font_candidates:
+        if font in available_fonts:
+            selected_font = font
+            break
+    
+    if selected_font:
+        plt.rcParams['font.family'] = selected_font
+    else:
+        # フォントが見つからない場合は英語で表示
+        plt.rcParams['font.family'] = 'DejaVu Sans'
     
     # 受胎率計算
     total = len(df)
@@ -570,9 +603,9 @@ def generate_print_html(df, week_id, farm_name, start_date, end_date, comments_d
         
         bars = ax.bar(x_values, y_values, color=color, edgecolor='white')
         
-        ax.set_xlabel('P2値')
-        ax.set_ylabel('頭数')
-        ax.set_title(title)
+        ax.set_xlabel('P2 (mm)')
+        ax.set_ylabel('Count')
+        ax.set_title(title.replace('（', ' (').replace('）', ')'))
         
         # 値をバーの上に表示
         for bar, val in zip(bars, y_values):
