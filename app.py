@@ -603,9 +603,17 @@ def generate_print_html(df, week_id, farm_name, start_date, end_date, comments_d
         
         bars = ax.bar(x_values, y_values, color=color, edgecolor='white')
         
+        # 英語ラベルを使用（文字化け防止）
         ax.set_xlabel('P2 (mm)')
         ax.set_ylabel('Count')
-        ax.set_title(title.replace('（', ' (').replace('）', ')'))
+        
+        # タイトルを英語に変換
+        if '経産' in title:
+            ax.set_title('P2 Distribution (Sow)')
+        elif '初産' in title:
+            ax.set_title('P2 Distribution (Gilt)')
+        else:
+            ax.set_title('P2 Distribution')
         
         # 値をバーの上に表示
         for bar, val in zip(bars, y_values):
