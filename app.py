@@ -215,6 +215,66 @@ def load_semen_report_from_sheet(spreadsheet, start_date):
     except Exception as e:
         return None
 
+def load_all_breeding_records(spreadsheet):
+    """すべての種付記録を読み込み"""
+    try:
+        ws = spreadsheet.worksheet("種付記録")
+        data = ws.get_all_values()
+        
+        if len(data) <= 1:
+            return None
+        
+        headers = data[0]
+        rows = data[1:]
+        
+        if not rows:
+            return None
+        
+        df = pd.DataFrame(rows, columns=headers)
+        
+        # farm_name列とweek_id列を除外
+        if 'farm_name' in df.columns:
+            df = df.drop(columns=['farm_name'])
+        if 'week_id' in df.columns:
+            df = df.drop(columns=['week_id'])
+        
+        return df
+    except Exception as e:
+        st.error(f"種付記録の読み込みに失敗しました: {e}")
+        return None
+
+
+def get_period_data(df, farm_name, period_type, year=None, month=None, start_date=None, end_date=None):
+    """指定期間のデータをフィルタリング"""
+    # 農場でフィルタ
+    if '農場' in df.columns:
+        df_filtered = df[df['農場'] == farm_name].copy()
+    else:
+        df_filtered = df.copy()
+    
+    # 種付日をdatetime型に変換
+    df_filtered['種付日_dt'] = pd.to_datetime(df_filtered['種付日'], errors='coerce')
+    
+    # 期間でフィルタ
+    if period_type == "月単位":
+        df_filtered = df_filtered[
+            (df_filtered['種付日_dt'].dt.year == year) & 
+            (df_filtered['種付日_dt'].dt.month == month)
+        ]
+    elif period_type == "年単位":
+        df_filtered = df_filtered[df_filtered['種付日_dt'].dt.year == year]
+    elif period_type == "カスタム期間":
+        df_filtered = df_filtered[
+            (df_filtered['種付日_dt'] >= pd.to_datetime(start_date)) & 
+            (df_filtered['種付日_dt'] <= pd.to_datetime(end_date))
+        ]
+    
+    # 種付日_dt列を削除
+    if '種付日_dt' in df_filtered.columns:
+        df_filtered = df_filtered.drop(columns=['種付日_dt'])
+    
+    return df_filtered
+
 def save_breeding_records(spreadsheet, df, week_id, farm_name):
     """種付記録をスプレッドシートに保存（一括処理）"""
     try:
@@ -904,7 +964,7 @@ if 'temp_week_comment' not in st.session_state:
 st.sidebar.header("📁 データ選択")
 
 # データソースの選択肢を設定
-data_sources = ["CSVをアップロード", "過去データから選択"]
+data_sources = ["CSVをアップロード", "過去データから選択", "期間別レポート"]
 
 data_source = st.sidebar.radio(
     "データの読み込み方法",
@@ -988,10 +1048,126 @@ elif data_source == "過去データから選択":
     else:
         st.sidebar.info("保存済みのデータがありません")
 
+elif data_source == "期間別レポート":
+    st.session_state.edit_mode = False  # 期間別レポートは閲覧のみ
+    
+    if all_farms:
+        selected_farm = st.sidebar.selectbox(
+            "農場を選択",
+            all_farms,
+            key="period_farm"
+        )
+        
+        period_type = st.sidebar.radio(
+            "期間の種類",
+            ["月単位", "年単位", "カスタム期間"]
+        )
+        
+        # 期間の選択
+        current_year = datetime.now().year
+        current_month = datetime.now().month
+        
+        if period_type == "月単位":
+            col_y, col_m = st.sidebar.columns(2)
+            with col_y:
+                selected_year = st.selectbox(
+                    "年",
+                    range(current_year, current_year - 5, -1),
+                    key="period_year_month"
+                )
+            with col_m:
+                selected_month = st.selectbox(
+                    "月",
+                    range(1, 13),
+                    index=current_month - 1,
+                    key="period_month"
+                )
+        elif period_type == "年単位":
+            selected_year = st.sidebar.selectbox(
+                "年",
+                range(current_year, current_year - 5, -1),
+                key="period_year"
+            )
+            selected_month = None
+        else:  # カスタム期間
+            col_start, col_end = st.sidebar.columns(2)
+            with col_start:
+                custom_start = st.date_input(
+                    "開始日",
+                    value=datetime(current_year, current_month, 1),
+                    key="period_start"
+                )
+            with col_end:
+                custom_end = st.date_input(
+                    "終了日",
+                    value=datetime.now(),
+                    key="period_end"
+                )
+            selected_year = None
+            selected_month = None
+        
+        if st.sidebar.button("レポートを表示"):
+            with st.spinner("データを集計中..."):
+                # すべての種付記録を読み込み
+                df_all = load_all_breeding_records(spreadsheet)
+                
+                if df_all is not None and len(df_all) > 0:
+                    # 期間でフィルタリング
+                    if period_type == "カスタム期間":
+                        df = get_period_data(
+                            df_all, selected_farm, period_type,
+                            start_date=custom_start, end_date=custom_end
+                        )
+                    else:
+                        df = get_period_data(
+                            df_all, selected_farm, period_type,
+                            year=selected_year, month=selected_month
+                        )
+                    
+                    if len(df) > 0:
+                        df['受胎'] = df['妊娠鑑定結果'] == '受胎確定'
+                        farm_name = selected_farm
+                        
+                        # 期間情報をセッションに保存
+                        st.session_state['period_df'] = df
+                        st.session_state['period_farm_name'] = farm_name
+                        st.session_state['period_type'] = period_type
+                        if period_type == "月単位":
+                            st.session_state['period_label'] = f"{selected_year}年{selected_month}月"
+                        elif period_type == "年単位":
+                            st.session_state['period_label'] = f"{selected_year}年"
+                        else:
+                            st.session_state['period_label'] = f"{custom_start} ～ {custom_end}"
+                        
+                        st.rerun()
+                    else:
+                        st.sidebar.warning("指定期間のデータがありません")
+                else:
+                    st.sidebar.warning("種付記録データがありません")
+    else:
+        st.sidebar.info("保存済みのデータがありません")
+    
+    # セッションステートからデータを復元
+    if 'period_df' in st.session_state:
+        df = st.session_state['period_df']
+        farm_name = st.session_state['period_farm_name']
+
 # ===================
 # メインコンテンツ
 # ===================
-if df is not None and week_id is not None:
+if df is not None and (week_id is not None or data_source == "期間別レポート"):
+    # 期間別レポートの場合は別のヘッダー
+    if data_source == "期間別レポート":
+        period_label = st.session_state.get('period_label', '')
+        st.header(f"📊 期間別受胎率レポート")
+        st.subheader(f"🏠 農場: {farm_name}")
+        st.subheader(f"📅 期間: {period_label}")
+        st.caption(f"作成日: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+        
+    else:
+        start_date = pd.to_datetime(df['種付日'].min())
+        end_date = pd.to_datetime(df['種付日'].max())
+        
     start_date = pd.to_datetime(df['種付日'].min())
     end_date = pd.to_datetime(df['種付日'].max())
     
@@ -1130,6 +1306,12 @@ if df is not None and week_id is not None:
         semen_stats = semen_stats.sort_values('種付', ascending=False)
         
         display_centered_table(semen_stats)
+    
+   # 期間別レポートの場合はここで終了（不受胎リスト、P2値、採精レポートは表示しない）
+    if data_source == "期間別レポート":
+        st.divider()
+        st.success(f"📊 集計対象: {len(df)}頭のデータを集計しました")
+        st.stop()
     
     # ===================
     # 不受胎リスト
