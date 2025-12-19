@@ -1166,9 +1166,9 @@ if df is not None and (week_id is not None or data_source == "期間別レポー
     # 期間別レポートの場合は別のヘッダー
     if data_source == "期間別レポート":
         period_label = st.session_state.get('period_label', '')
-        st.header(f"📊 期間別受胎率レポート")
-        st.subheader(f"🏠 農場: {farm_name}")
-        st.subheader(f"📅 期間: {period_label}")
+        st.header(f"期間別受胎率レポート")
+        st.subheader(f"農場: {farm_name}")
+        st.subheader(f"期間: {period_label}")
         st.caption(f"作成日: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
         
     else:
@@ -1317,7 +1317,113 @@ if df is not None and (week_id is not None or data_source == "期間別レポー
    # 期間別レポートの場合はここで終了（不受胎リスト、P2値、採精レポートは表示しない）
     if data_source == "期間別レポート":
         st.divider()
-        st.success(f"📊 集計対象: {len(df)}頭のデータを集計しました")
+        
+        # ===================
+        # 週ごとの受胎率推移
+        # ===================
+        st.subheader("【週ごとの受胎率推移】")
+        
+        # 種付日から週の開始日を計算
+        df['種付日_dt'] = pd.to_datetime(df['種付日'])
+        df['週開始日'] = df['種付日_dt'].apply(lambda x: x - timedelta(days=x.weekday()))
+        
+        # 週ごとに集計
+        weekly_stats = df.groupby('週開始日').agg(
+            種付頭数=('受胎', 'count'),
+            受胎頭数=('受胎', 'sum')
+        ).reset_index()
+        
+        weekly_stats['受胎率'] = (weekly_stats['受胎頭数'] / weekly_stats['種付頭数'] * 100).round(1)
+        weekly_stats['週開始日'] = weekly_stats['週開始日'].dt.strftime('%Y-%m-%d')
+        
+        # 経産・初産別の週ごと集計
+        df_sow = df[df['産次'].astype(int) >= 2]
+        df_gilt = df[df['産次'].astype(int) == 1]
+        
+        weekly_sow = df_sow.groupby('週開始日').agg(
+            経産_種付=('受胎', 'count'),
+            経産_受胎=('受胎', 'sum')
+        ).reset_index()
+        weekly_sow['経産_受胎率'] = (weekly_sow['経産_受胎'] / weekly_sow['経産_種付'] * 100).round(1)
+        
+        weekly_gilt = df_gilt.groupby('週開始日').agg(
+            初産_種付=('受胎', 'count'),
+            初産_受胎=('受胎', 'sum')
+        ).reset_index()
+        weekly_gilt['初産_受胎率'] = (weekly_gilt['初産_受胎'] / weekly_gilt['初産_種付'] * 100).round(1)
+        
+        # データを結合
+        weekly_stats['週開始日_dt'] = pd.to_datetime(weekly_stats['週開始日'])
+        weekly_sow['週開始日_dt'] = weekly_sow['週開始日']
+        weekly_gilt['週開始日_dt'] = weekly_gilt['週開始日']
+        
+        weekly_merged = weekly_stats.copy()
+        weekly_merged = weekly_merged.merge(
+            weekly_sow[['週開始日_dt', '経産_種付', '経産_受胎', '経産_受胎率']], 
+            on='週開始日_dt', how='left'
+        )
+        weekly_merged = weekly_merged.merge(
+            weekly_gilt[['週開始日_dt', '初産_種付', '初産_受胎', '初産_受胎率']], 
+            on='週開始日_dt', how='left'
+        )
+        
+        # 表示用に整形
+        weekly_display = weekly_merged[['週開始日', '種付頭数', '受胎頭数', '受胎率', 
+                                         '経産_種付', '経産_受胎', '経産_受胎率',
+                                         '初産_種付', '初産_受胎', '初産_受胎率']].copy()
+        weekly_display.columns = ['週開始日', '種付', '受胎', '受胎率(%)', 
+                                   '経産種付', '経産受胎', '経産率(%)',
+                                   '初産種付', '初産受胎', '初産率(%)']
+        
+        # NaNを0に置換
+        weekly_display = weekly_display.fillna(0)
+        for col in ['経産種付', '経産受胎', '初産種付', '初産受胎']:
+            weekly_display[col] = weekly_display[col].astype(int)
+        
+        # 受胎率に%を追加
+        weekly_display['受胎率(%)'] = weekly_display['受胎率(%)'].astype(str) + '%'
+        weekly_display['経産率(%)'] = weekly_display['経産率(%)'].astype(str) + '%'
+        weekly_display['初産率(%)'] = weekly_display['初産率(%)'].astype(str) + '%'
+        
+        # 表を表示
+        display_centered_table(weekly_display)
+        
+        # 折れ線グラフ
+        st.subheader("【受胎率推移グラフ】")
+        
+        import altair as alt
+        
+        # グラフ用データを準備
+        chart_data = weekly_merged[['週開始日', '受胎率', '経産_受胎率', '初産_受胎率']].copy()
+        chart_data.columns = ['週開始日', '合計', '経産', '初産']
+        
+        # 縦持ちに変換
+        chart_melted = chart_data.melt(
+            id_vars=['週開始日'],
+            value_vars=['合計', '経産', '初産'],
+            var_name='区分',
+            value_name='受胎率'
+        )
+        
+        # NaNを除外
+        chart_melted = chart_melted.dropna()
+        
+        # 折れ線グラフを作成
+        line_chart = alt.Chart(chart_melted).mark_line(point=True).encode(
+            x=alt.X('週開始日:N', title='週開始日', sort=None),
+            y=alt.Y('受胎率:Q', title='受胎率 (%)', scale=alt.Scale(domain=[0, 100])),
+            color=alt.Color('区分:N', title='区分', 
+                           scale=alt.Scale(domain=['合計', '経産', '初産'],
+                                          range=['#1f77b4', '#2ca02c', '#ff7f0e'])),
+            tooltip=['週開始日', '区分', alt.Tooltip('受胎率:Q', format='.1f')]
+        ).properties(
+            height=400
+        )
+        
+        st.altair_chart(line_chart, use_container_width=True)
+        
+        st.divider()
+        st.success(f"集計対象: {len(df)}頭のデータを集計しました")
         st.stop()
     
     # ===================
