@@ -129,10 +129,11 @@ def parse_date_flexible(date_value, year=2025):
     return date_str
 
 
-def load_p2_data_from_sheet(spreadsheet, farm_name, weaning_date):
+@st.cache_data(ttl=60)
+def load_p2_data_from_sheet(_spreadsheet, farm_name, weaning_date):
     """スプレッドシートからP2値（経産）を読み込み"""
     try:
-        ws = spreadsheet.worksheet("P2値_経産")
+        ws = _spreadsheet.worksheet("P2値_経産")
         data = ws.get_all_records()
         
         # 検索対象の日付を正規化
@@ -150,10 +151,11 @@ def load_p2_data_from_sheet(spreadsheet, farm_name, weaning_date):
         return None
 
 
-def load_gilt_p2_data_from_sheet(spreadsheet, farm_name, week_id):
+@st.cache_data(ttl=60)
+def load_gilt_p2_data_from_sheet(_spreadsheet, farm_name, week_id):
     """スプレッドシートからP2値（初産）を読み込み"""
     try:
-        ws = spreadsheet.worksheet("P2値_初産")
+        ws = _spreadsheet.worksheet("P2値_初産")
         data = ws.get_all_records()
         
         # 検索対象の日付を正規化
@@ -171,10 +173,11 @@ def load_gilt_p2_data_from_sheet(spreadsheet, farm_name, week_id):
         return None
 
 
-def load_semen_report_from_sheet(spreadsheet, start_date):
+@st.cache_data(ttl=60)
+def load_semen_report_from_sheet(_spreadsheet, start_date):
     """スプレッドシートから採精レポートを読み込み"""
     try:
-        ws = spreadsheet.worksheet("採精レポート")
+        ws = _spreadsheet.worksheet("採精レポート")
         data = ws.get_all_records()
         
         if not data:
@@ -215,10 +218,11 @@ def load_semen_report_from_sheet(spreadsheet, start_date):
     except Exception as e:
         return None
 
-def load_all_breeding_records(spreadsheet):
+@st.cache_data(ttl=60)
+def load_all_breeding_records(_spreadsheet):
     """すべての種付記録を読み込み"""
     try:
-        ws = spreadsheet.worksheet("種付記録")
+        ws = _spreadsheet.worksheet("種付記録")
         data = ws.get_all_values()
         
         if len(data) <= 1:
@@ -315,10 +319,11 @@ def save_breeding_records(spreadsheet, df, week_id, farm_name):
     except Exception as e:
         st.error(f"種付記録の保存に失敗しました: {e}")
         return False
-def load_breeding_records(spreadsheet, week_id, farm_name):
+@st.cache_data(ttl=60)
+def load_breeding_records(_spreadsheet, week_id, farm_name):
     """種付記録をスプレッドシートから読み込み"""
     try:
-        ws = get_or_create_worksheet(spreadsheet, "種付記録")
+        ws = get_or_create_worksheet(_spreadsheet, "種付記録")
         data = ws.get_all_values()
         
         if len(data) <= 1:
@@ -344,10 +349,12 @@ def load_breeding_records(spreadsheet, week_id, farm_name):
     except Exception as e:
         st.error(f"種付記録の読み込みに失敗しました: {e}")
         return None
-def get_saved_farms_and_weeks(spreadsheet):
+    
+@st.cache_data(ttl=60)
+def get_saved_farms_and_weeks(_spreadsheet):
     """保存済みの農場と週一覧を取得"""
     try:
-        ws = get_or_create_worksheet(spreadsheet, "種付記録")
+        ws = get_or_create_worksheet(_spreadsheet, "種付記録")
         data = ws.get_all_values()
         
         if len(data) <= 1:
